@@ -1,0 +1,71 @@
+using Microsoft.Graph.Models.ExternalConnectors;
+using Microsoft.OpenApi.Models;
+using Model;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Serialization;
+using Service;
+using Swashbuckle.AspNetCore.SwaggerUI;
+using 上传MES.Config;
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services to the container.
+
+builder.Services.AddControllers()
+    .AddJsonOptions(options => options.JsonSerializerOptions.PropertyNamingPolicy = null) //防止传过来JSON对象首字母小写所以置为null
+    .AddNewtonsoftJson(op =>
+    {
+        //JSON 不处理null值，以及日期时间格式化,否则导致接受不到实体
+        op.SerializerSettings.ContractResolver = new DefaultContractResolver();
+        op.SerializerSettings.NullValueHandling = NullValueHandling.Ignore;
+        op.SerializerSettings.DateFormatString = "yyyy-MM-dd HH:mm:ss";
+    });////builder.Services.AddControllers();
+// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+builder.Services.AddHttpClient();
+// 添加配置文件
+builder.Configuration
+       .SetBasePath(AppContext.BaseDirectory)
+       .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+builder.Register();
+
+// 注册数据库工厂（单例）
+builder.Services.AddSingleton<DbFactory>();
+
+// 注册业务服务 
+builder.Services.AddTransient<DataService>();
+// 读取 appsettings.json 中的 Urls 配置
+var urls = builder.Configuration["Urls"];
+if (!string.IsNullOrEmpty(urls))
+{
+    builder.WebHost.UseUrls(urls); // 应用自定义域名配置
+}
+
+var app = builder.Build();
+// Configure the HTTP request pipeline.
+////if (app.Environment.IsDevelopment())//不是调试环境下一样可以启动swagger
+{
+        
+    app.UseSwagger();
+    //app.UseSwaggerUI();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "MyMES V1");
+        c.RoutePrefix = string.Empty;
+        //c.DocExpansion(DocExpansion.None);//样式
+    });
+}
+
+#region 鉴权授权
+app.UseRouting();
+app.UseCors("AllowAll");
+app.UseAuthentication();
+app.UseAuthorization();
+#endregion
+app.MapControllers();
+app.MapControllerRoute(
+    name: "default",
+    pattern: "{controller=Home}/{action=Index}/{id?}");
+
+app.Run();

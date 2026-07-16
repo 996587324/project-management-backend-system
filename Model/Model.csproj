@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SqlSugarCore" Version="5.1.4.76" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EditorConfigFiles Remove="D:\process\鹏辉\上传MES\UpBatListServerToMES\Model\.editorconfig" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="D:\process\鹏辉\上传MES\UpBatListServerToMES\Model\.editorconfig" />
+  </ItemGroup>
+
+</Project>
