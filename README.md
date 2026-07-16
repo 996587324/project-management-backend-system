@@ -4,7 +4,7 @@
 
 ## 项目简介
 
-本项目是小型团队项目管理系统的后端工程，采用分层结构组织代码：
+本项目是项目管理系统的后端工程，采用分层结构组织代码：
 
 - `calmadmin`：Web API 启动项目，包含控制器、Swagger、鉴权、配置等。
 - `Interface`：服务接口定义。
@@ -40,38 +40,7 @@
 
 - .NET SDK 8.0+
 - SQL Server 2016+ 或兼容版本
-- Visual Studio 2022 / Rider / VS Code，任选其一
-
-检查 .NET 版本：
-
-```bash
-dotnet --version
-```
-
-## 快速开始
-
-进入后端目录：
-
-```bash
-cd project-management-backend-system
-```
-
-还原依赖：
-
-```bash
-dotnet restore
-```
-
-编译项目：
-
-```bash
-dotnet build calmadmin/calmadmin.csproj -c Release
-```
-
-启动服务：
-
-```bash
-dotnet run --project calmadmin/calmadmin.csproj
+- Visual Studio 2026
 ```
 
 默认开发地址：
@@ -91,9 +60,3 @@ http://localhost:8089/index.html
 ```text
 http://10.148.201.223:8087/swagger/index.html
 ```
-
-## 常用命令
-
-```bash
-# 还原依赖
-dotnet restore
