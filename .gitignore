@@ -1,0 +1,15 @@
+﻿################################################################################
+# 此 .gitignore 文件已由 Microsoft(R) Visual Studio 自动创建。
+################################################################################
+
+/calmadmin/bin
+/calmadmin/.vs
+/calmadmin/obj
+/calmadmin/Properties
+/calmadmin/uploads/宿舍电梯
+/Interface/bin
+/Interface/obj
+/Model/bin
+/Model/obj
+/Service/bin
+/Service/obj
