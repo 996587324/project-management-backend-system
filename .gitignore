@@ -13,3 +13,7 @@
 /Model/obj
 /Service/bin
 /Service/obj
+/.codex-build/ws-temp-calmadmin/ws-obj/Release/net8.0
+/.codex-build/ws-temp-interface/ws-obj/Release/net8.0
+/.codex-build/ws-temp-interface/ws-obj
+/.codex-build
