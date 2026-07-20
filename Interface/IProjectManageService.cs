@@ -9,12 +9,13 @@ public interface IProjectManageService
     Task<List<ProjectStageOptionDto>> GetProjectStagesAsync();
     Task<ProjectOutputDto?> GetProjectAsync(int id);
     Task<int> CreateProjectAsync(ProjectSaveDto dto);
+    Task<ProjectBatchImportResultDto> ImportProjectsAsync(string fileName, Stream stream, string? userId = null);
     Task<bool> UpdateProjectAsync(ProjectSaveDto dto);
     Task<bool> ChangeProjectStatusAsync(int id, byte status);
     Task<bool> DeleteProjectAsync(int id);
 
     Task<PagedResultDto<TaskOutputDto>> GetTaskPageAsync(TaskQueryDto query);
-    Task<List<TaskOutputDto>> GetTaskTreeAsync(string? projectId);
+    Task<List<TaskOutputDto>> GetTaskTreeAsync(string? projectId, string? executorId = null);
     Task<List<TaskParentOptionDto>> GetTaskParentOptionsAsync(string? projectId, int currentId = 0);
     Task<List<TaskTypeOptionDto>> GetTaskTypeOptionsAsync();
     Task<TaskOutputDto?> GetTaskAsync(int id);

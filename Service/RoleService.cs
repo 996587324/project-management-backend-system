@@ -1,4 +1,4 @@
-﻿using Interface;
+using Interface;
 using Model.User;
 using SqlSugar;
 
@@ -110,7 +110,7 @@ public class RoleService : IRoleService
         var defaults = new[]
         {
             new SysRole { roleName = "管理员", roleCode = "R_ADMIN", description = "系统管理员，拥有全部权限", permissionKeys = "*", enabled = true },
-            new SysRole { roleName = "工程师", roleCode = "R_ENGINEER", description = "工程师角色，后续可扩展为工艺/设备/品质工程师", permissionKeys = "Dashboard,ProjectDashboard,ProjectLedger,TaskBoard,ProjectFile", enabled = true },
+            new SysRole { roleName = "工程师", roleCode = "R_ENGINEER", description = "工程师角色，后续可扩展为工艺/设备/品质工程师", permissionKeys = "Dashboard,ProjectDashboard,ProjectLedger,TaskBoard,ProjectFile,Agent,AgentExecutor", enabled = true },
             new SysRole { roleName = "普通用户", roleCode = "R_USER", description = "普通用户，仅保留基础工作台和个人权限", permissionKeys = "Dashboard", enabled = true }
         };
 

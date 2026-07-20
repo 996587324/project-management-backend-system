@@ -5,6 +5,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using Service;
 using Swashbuckle.AspNetCore.SwaggerUI;
+using calmadmin.WebSockets;
 using 上传MES.Config;
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,6 +30,7 @@ builder.Configuration
        .SetBasePath(AppContext.BaseDirectory)
        .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 builder.Register();
+builder.Services.AddScoped<AgentWebSocketHandler>();
 
 // 注册数据库工厂（单例）
 builder.Services.AddSingleton<DbFactory>();
@@ -58,12 +60,20 @@ var app = builder.Build();
 }
 
 #region 鉴权授权
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(20)
+});
 app.UseRouting();
 app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
 #endregion
 app.MapControllers();
+app.MapGet("/ws/agent", async (HttpContext context, AgentWebSocketHandler handler) =>
+{
+    await handler.HandleAsync(context);
+}).RequireAuthorization();
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");

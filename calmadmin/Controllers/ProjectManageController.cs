@@ -1,6 +1,7 @@
 using Interface;
 using Microsoft.AspNetCore.Mvc;
 using Model.ProjectManage;
+using System.Text;
 
 namespace calmadmin.Controllers;
 
@@ -44,6 +45,32 @@ public class ProjectManageController : ControllerBase
        return  Success(res, "创建成功");
     }
 
+    [HttpPost("projects/import")]
+    public async Task<IActionResult> ImportProjects([FromForm] IFormFile file, [FromForm] string? userId)
+    {
+        try
+        {
+            if (file == null || file.Length == 0) return Error("请选择要导入的文件", 400);
+            await using var stream = file.OpenReadStream();
+            var result = await _service.ImportProjectsAsync(file.FileName, stream, userId);
+            return Success(result, result.Message);
+        }
+        catch (Exception ex)
+        {
+            return Error($"导入失败: {ex.Message}", 500);
+        }
+    }
+
+    [HttpGet("projects/import-template")]
+    public IActionResult DownloadProjectImportTemplate()
+    {
+        var csv = new StringBuilder();
+        csv.AppendLine("项目编号,项目名称,项目类型,开始时间,结束时间,负责人ID,负责人名称,客户名称,合同编号,项目阶段,项目状态,优先级,项目标签,备注");
+        csv.AppendLine("PM-2026-001,示例项目,验收,2026-07-01,2026-07-31,1,系统管理员,示例客户,HT-001,开箱,待启动,中,示例标签,示例备注");
+        var bytes = Encoding.UTF8.GetPreamble().Concat(Encoding.UTF8.GetBytes(csv.ToString())).ToArray();
+        return File(bytes, "text/csv; charset=utf-8", "项目批量导入模板.csv");
+    }
+
     [HttpPost("projects/{id:int}")]
     public async Task<IActionResult> UpdateProject(int id, [FromBody] ProjectSaveDto dto)
     {
@@ -65,7 +92,8 @@ public class ProjectManageController : ControllerBase
     public async Task<IActionResult> GetTasks([FromQuery] TaskQueryDto query) => Success(await _service.GetTaskPageAsync(query));
 
     [HttpGet("tasks/tree")]
-    public async Task<IActionResult> GetTaskTree([FromQuery] string? projectId) => Success(await _service.GetTaskTreeAsync(projectId));
+    public async Task<IActionResult> GetTaskTree([FromQuery] string? projectId, [FromQuery] string? executorId) =>
+        Success(await _service.GetTaskTreeAsync(projectId, executorId));
 
     [HttpGet("tasks/parent-options")]
     public async Task<IActionResult> GetTaskParentOptions([FromQuery] string? projectId, [FromQuery] int currentId = 0) =>

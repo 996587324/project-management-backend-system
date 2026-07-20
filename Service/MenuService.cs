@@ -30,6 +30,8 @@ namespace Service
         {
             try
             {
+                await EnsureAgentMenuAsync();
+                await EnsureProjectManageMenuPermissionsAsync();
                 var allMenus = await _db.GetConnection("calmadmin").Queryable<sys_menu>()
                                        .Where(m => m.Status == true)
                                        .OrderBy(m => m.Sort)
@@ -46,6 +48,204 @@ namespace Service
             {
                 throw ex;
             }
+        }
+
+        private async Task EnsureProjectManageMenuPermissionsAsync()
+        {
+            var db = _db.GetConnection("calmadmin");
+            var menus = await db.Queryable<sys_menu>()
+                .Where(x =>
+                    x.MenuName == "ProjectLedger" ||
+                    x.MenuName == "TaskBoard" ||
+                    x.MenuName == "ProjectFile" ||
+                    x.Component == "/projectmanage/project" ||
+                    x.Component == "/projectmanage/task" ||
+                    x.Component == "/projectmanage/file")
+                .ToListAsync();
+
+            foreach (var menu in menus)
+            {
+                var routeName = GetProjectManageRouteName(menu);
+                if (string.IsNullOrWhiteSpace(routeName)) continue;
+
+                var requiredAuthList = GetProjectManageAuthList(routeName);
+
+                var mergedJson = MergeAuthList(menu.MetaAuthList, requiredAuthList, out var changed);
+                var nameChanged = !string.Equals(menu.MenuName, routeName, StringComparison.OrdinalIgnoreCase);
+                if (!changed && !nameChanged) continue;
+
+                menu.MenuName = routeName;
+                menu.MetaAuthList = mergedJson;
+                await db.Updateable(menu)
+                    .UpdateColumns(x => new { x.MenuName, x.MetaAuthList })
+                    .ExecuteCommandAsync();
+            }
+        }
+
+        private static string? GetProjectManageRouteName(sys_menu menu)
+        {
+            var name = menu.MenuName ?? string.Empty;
+            var component = (menu.Component ?? string.Empty).Replace("\\", "/");
+
+            if (name.Equals("ProjectLedger", StringComparison.OrdinalIgnoreCase) ||
+                component.Equals("/projectmanage/project", StringComparison.OrdinalIgnoreCase))
+            {
+                return "ProjectLedger";
+            }
+
+            if (name.Equals("TaskBoard", StringComparison.OrdinalIgnoreCase) ||
+                component.Equals("/projectmanage/task", StringComparison.OrdinalIgnoreCase))
+            {
+                return "TaskBoard";
+            }
+
+            if (name.Equals("ProjectFile", StringComparison.OrdinalIgnoreCase) ||
+                component.Equals("/projectmanage/file", StringComparison.OrdinalIgnoreCase))
+            {
+                return "ProjectFile";
+            }
+
+            return null;
+        }
+
+        private static List<MenuAuthItem> GetProjectManageAuthList(string routeName)
+        {
+            if (routeName.Equals("ProjectLedger", StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<MenuAuthItem>
+                {
+                    NewAuth("新增项目", "Create"),
+                    NewAuth("批量导入", "Import"),
+                    NewAuth("下载模板", "Template"),
+                    NewAuth("编辑项目", "Update"),
+                    NewAuth("变更状态", "Status"),
+                    NewAuth("删除项目", "Delete")
+                };
+            }
+
+            if (routeName.Equals("TaskBoard", StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<MenuAuthItem>
+                {
+                    NewAuth("新增任务", "Create"),
+                    NewAuth("编辑任务", "Update"),
+                    NewAuth("变更状态", "Status"),
+                    NewAuth("删除任务", "Delete")
+                };
+            }
+
+            if (routeName.Equals("ProjectFile", StringComparison.OrdinalIgnoreCase))
+            {
+                return new List<MenuAuthItem>
+                {
+                    NewAuth("上传文件", "Upload"),
+                    NewAuth("在线预览", "Preview"),
+                    NewAuth("下载文件", "Download"),
+                    NewAuth("删除文件", "Delete")
+                };
+            }
+
+            return new List<MenuAuthItem>();
+        }
+
+        private static string MergeAuthList(string? authListJson, List<MenuAuthItem> requiredAuthList, out bool changed)
+        {
+            changed = false;
+            var current = new List<MenuAuthItem>();
+
+            if (!string.IsNullOrWhiteSpace(authListJson))
+            {
+                try
+                {
+                    current = Newtonsoft.Json.JsonConvert.DeserializeObject<List<MenuAuthItem>>(authListJson) ?? new List<MenuAuthItem>();
+                }
+                catch
+                {
+                    changed = true;
+                }
+            }
+
+            var existingMarks = new HashSet<string>(
+                current
+                    .Select(x => x.AuthMark)
+                    .Where(x => !string.IsNullOrWhiteSpace(x)),
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var item in requiredAuthList)
+            {
+                if (existingMarks.Contains(item.AuthMark)) continue;
+
+                current.Add(item);
+                existingMarks.Add(item.AuthMark);
+                changed = true;
+            }
+
+            return Newtonsoft.Json.JsonConvert.SerializeObject(current);
+        }
+
+        private static MenuAuthItem NewAuth(string title, string authMark) => new()
+        {
+            Title = title,
+            AuthMark = authMark
+        };
+
+        private async Task EnsureAgentMenuAsync()
+        {
+            var db = _db.GetConnection("calmadmin");
+            db.CodeFirst.SetStringDefaultLength(200).InitTables(typeof(sys_menu));
+
+            var exists = await db.Queryable<sys_menu>().AnyAsync(x => x.Path == "/agent" || x.MenuName == "Agent");
+            if (exists) return;
+
+            var rootMenus = await db.Queryable<sys_menu>().Where(x => x.ParentId == "0").ToListAsync();
+            var maxRootId = rootMenus
+                .Select(x => int.TryParse(x.MenuId, out var id) ? id : 0)
+                .DefaultIfEmpty(0)
+                .Max();
+            var rootId = (maxRootId + 1).ToString();
+            var now = DateTime.Now;
+
+            await db.Insertable(new sys_menu
+            {
+                MenuId = rootId,
+                ParentId = "0",
+                MenuName = "Agent",
+                Path = "/agent",
+                Component = "/index/index",
+                MetaTitle = "Agent 中心",
+                MetaIcon = "ri:robot-2-line",
+                MetaKeepAlive = true,
+                MetaFixedTab = false,
+                MetaIsHide = false,
+                MetaIsHideTab = false,
+                MetaIsFullPage = false,
+                MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                MetaAuthList = "[]",
+                Sort = 98,
+                Status = true,
+                CreateTime = now
+            }).ExecuteCommandAsync();
+
+            await db.Insertable(new sys_menu
+            {
+                MenuId = $"{rootId}01",
+                ParentId = rootId,
+                MenuName = "AgentExecutor",
+                Path = "executor",
+                Component = "/agent/executor",
+                MetaTitle = "项目智能助手",
+                MetaIcon = "ri:robot-2-line",
+                MetaKeepAlive = true,
+                MetaFixedTab = false,
+                MetaIsHide = false,
+                MetaIsHideTab = false,
+                MetaIsFullPage = false,
+                MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                MetaAuthList = "[]",
+                Sort = 1,
+                Status = true,
+                CreateTime = now
+            }).ExecuteCommandAsync();
         }
 
         /// <summary>

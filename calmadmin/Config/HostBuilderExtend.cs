@@ -3,6 +3,7 @@ using Autofac.Extensions.DependencyInjection;
 using Interface;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using Model.Agent;
 using Model.Other;
 using Newtonsoft.Json;
 using Service;
@@ -131,6 +132,7 @@ namespace 上传MES.Config
             builder.Services.AddAutoMapper(typeof(AutoMapperConfigs));
             //注册JWT
             builder.Services.Configure<JWTTokenOptions>(builder.Configuration.GetSection("JWTTokenOptions"));
+            builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("AgentOptions"));
             #region JWT校验
             //增加鉴权逻辑
             JWTTokenOptions tokenOptions = new JWTTokenOptions();
@@ -148,6 +150,19 @@ namespace 上传MES.Config
                      ValidAudience = tokenOptions.Audience,//
                      ValidIssuer = tokenOptions.Issuer,//Issuer，这两项和前面签发jwt的设置一致
                      IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tokenOptions.SecurityKey)),//拿到SecurityKey 
+                 };
+                 options.Events = new JwtBearerEvents
+                 {
+                     OnMessageReceived = context =>
+                     {
+                         if (context.HttpContext.Request.Path.StartsWithSegments("/ws/agent") &&
+                             context.Request.Query.TryGetValue("access_token", out var accessToken))
+                         {
+                             context.Token = accessToken;
+                         }
+
+                         return Task.CompletedTask;
+                     }
                  };
              });
             #endregion
@@ -239,6 +254,17 @@ namespace 上传MES.Config
             builder.Services.AddScoped<IBusinessBillRepository, BusinessBillRepository>();
             builder.Services.AddScoped<IBusinessBillService, BusinessBillService>();
             builder.Services.AddScoped<IProjectManageService, ProjectManageService>();
+            builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("EmailOptions"));
+            builder.Services.AddScoped<IEmailService, EmailService>();
+            builder.Services.AddScoped<IAgentToolRegistryService, AgentToolRegistryService>();
+            builder.Services.AddScoped<IAgentToolDispatcher, AgentToolDispatcher>();
+            builder.Services.AddScoped<IAgentBusinessToolExecutor, ProjectManagementAgentToolExecutor>();
+            builder.Services.AddScoped<IAgentBusinessToolExecutor, AgentEmailBusinessToolExecutor>();
+            builder.Services.AddScoped<IAgentService, AgentService>();
+            builder.Services.AddHttpClient<IAgentModelClient, AgentModelClient>(client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+            });
 
 
         }

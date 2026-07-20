@@ -43,8 +43,8 @@ public class ProjectSaveDto
     public byte ProjectStage { get; set; } = 1;
     public byte ProjectStatus { get; set; } = 1;
     public decimal Progress { get; set; }
-    public DateTime StartTime { get; set; }
-    public DateTime EndTime { get; set; }
+    public DateTime StartTime { get; set; } = DateTime.Now;
+    public DateTime EndTime { get; set; } = DateTime.Now;
     public string ManagerId { get; set; } = string.Empty;
     public string? ManagerUserId { get; set; }
     public string? ManagerName { get; set; }
@@ -55,10 +55,29 @@ public class ProjectSaveDto
 
 public class ProjectOutputDto : ProjectSaveDto
 {
-    public DateTime CreateTime { get; set; }
-    public DateTime? UpdateTime { get; set; }
+    public DateTime CreateTime { get; set; } = DateTime.Now;
+    public DateTime? UpdateTime { get; set; } = DateTime.Now;
     public int TaskCount { get; set; }
     public int FileCount { get; set; }
+}
+
+public class ProjectBatchImportResultDto
+{
+    public int Total { get; set; }
+    public int CreatedCount { get; set; }
+    public int FailedCount { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public List<ProjectBatchImportRowDto> Rows { get; set; } = new();
+}
+
+public class ProjectBatchImportRowDto
+{
+    public int RowIndex { get; set; }
+    public bool Success { get; set; }
+    public int? ProjectId { get; set; }
+    public string ProjectCode { get; set; } = string.Empty;
+    public string ProjectName { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
 }
 
 public class ProjectStageOptionDto

@@ -1,7 +1,10 @@
 using Interface;
 using Model.ProjectManage;
 using Model.User;
+using NPOI.SS.UserModel;
 using SqlSugar;
+using System.Globalization;
+using System.Text;
 
 namespace Service;
 
@@ -78,6 +81,66 @@ public class ProjectManageService : IProjectManageService
         return await Db.Insertable(entity).ExecuteReturnIdentityAsync();
     }
 
+    public async Task<ProjectBatchImportResultDto> ImportProjectsAsync(string fileName, Stream stream, string? userId = null)
+    {
+        var rows = ReadProjectImportRows(fileName, stream);
+        if (rows.Count < 2) throw new InvalidOperationException("文件内容为空，或未识别到表头和数据行");
+
+        var headers = rows[0].Select(NormalizeImportHeader).ToList();
+        var existingCodes = (await GetProjectListAsync())
+            .Select(x => x.ProjectCode)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var importCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var users = await GetImportUsersAsync();
+        var result = new ProjectBatchImportResultDto();
+
+        for (var i = 1; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (row.All(string.IsNullOrWhiteSpace)) continue;
+
+            result.Total++;
+            var project = BuildProjectFromImportRow(headers, row, userId, users);
+            var errors = ValidateImportedProject(project, existingCodes, importCodes);
+            var item = new ProjectBatchImportRowDto
+            {
+                RowIndex = i + 1,
+                ProjectCode = project.ProjectCode,
+                ProjectName = project.ProjectName
+            };
+
+            if (errors.Any())
+            {
+                item.Success = false;
+                item.Message = string.Join("；", errors);
+                result.FailedCount++;
+                result.Rows.Add(item);
+                continue;
+            }
+
+            try
+            {
+                item.ProjectId = await CreateProjectAsync(project);
+                item.Success = true;
+                item.Message = "导入成功";
+                result.CreatedCount++;
+                existingCodes.Add(project.ProjectCode);
+            }
+            catch (Exception ex)
+            {
+                item.Success = false;
+                item.Message = ex.Message;
+                result.FailedCount++;
+            }
+
+            result.Rows.Add(item);
+        }
+
+        result.Message = $"批量导入完成：共识别 {result.Total} 行，成功 {result.CreatedCount} 行，失败 {result.FailedCount} 行";
+        return result;
+    }
+
     public async Task<bool> UpdateProjectAsync(ProjectSaveDto dto)
     {
         var entity = await Db.Queryable<ProjectEntity>().FirstAsync(x => x.Id == dto.Id && x.IsDelete == 0);
@@ -139,7 +202,7 @@ public class ProjectManageService : IProjectManageService
         };
     }
 
-    public async Task<List<TaskOutputDto>> GetTaskTreeAsync(string? projectId)
+    public async Task<List<TaskOutputDto>> GetTaskTreeAsync(string? projectId, string? executorId = null)
     {
         var activeProjectKeys = await GetActiveProjectKeysAsync();
         var selectedProjectKeys = await GetProjectKeysAsync(projectId);
@@ -147,6 +210,7 @@ public class ProjectManageService : IProjectManageService
             .Where(x => x.IsDelete == 0)
             .Where(x => activeProjectKeys.Contains(x.ProjectId))
             .WhereIF(!string.IsNullOrWhiteSpace(projectId), x => selectedProjectKeys.Contains(x.ProjectId))
+            .WhereIF(!string.IsNullOrWhiteSpace(executorId), x => x.ExecutorId == executorId)
             .OrderBy(x => x.Sort)
             .OrderBy(x => x.CreateTime)
             .ToListAsync();
@@ -669,6 +733,309 @@ public class ProjectManageService : IProjectManageService
         if (endTime.Date < DateTime.Now.Date) return 4;
         if (progress <= 0) return 1;
         return fallback == 4 ? (byte)2 : fallback;
+    }
+
+    private static List<List<string>> ReadProjectImportRows(string fileName, Stream stream)
+    {
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
+        return extension switch
+        {
+            ".csv" => ParseCsvRows(ReadAllText(stream)),
+            ".xls" or ".xlsx" => ReadExcelRows(stream),
+            _ => throw new InvalidOperationException("仅支持 CSV、XLS、XLSX 文件")
+        };
+    }
+
+    private static string ReadAllText(Stream stream)
+    {
+        if (stream.CanSeek) stream.Position = 0;
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+        return reader.ReadToEnd();
+    }
+
+    private static List<List<string>> ReadExcelRows(Stream stream)
+    {
+        if (stream.CanSeek) stream.Position = 0;
+        var rows = new List<List<string>>();
+        using var workbook = WorkbookFactory.Create(stream);
+        var sheet = workbook.NumberOfSheets > 0 ? workbook.GetSheetAt(0) : null;
+        if (sheet == null) return rows;
+
+        var maxCellCount = 0;
+        for (var i = sheet.FirstRowNum; i <= sheet.LastRowNum; i++)
+        {
+            var row = sheet.GetRow(i);
+            if (row == null) continue;
+            maxCellCount = Math.Max(maxCellCount, row.LastCellNum);
+        }
+
+        for (var i = sheet.FirstRowNum; i <= sheet.LastRowNum; i++)
+        {
+            var sheetRow = sheet.GetRow(i);
+            if (sheetRow == null) continue;
+            var row = new List<string>();
+            for (var j = 0; j < maxCellCount; j++)
+            {
+                row.Add(GetCellText(sheetRow.GetCell(j)).Trim());
+            }
+            if (row.Any(x => !string.IsNullOrWhiteSpace(x))) rows.Add(row);
+        }
+
+        return rows;
+    }
+
+    private static string GetCellText(ICell? cell)
+    {
+        if (cell == null) return string.Empty;
+
+        return cell.CellType switch
+        {
+            CellType.String => cell.StringCellValue ?? string.Empty,
+            CellType.Boolean => cell.BooleanCellValue ? "true" : "false",
+            CellType.Numeric => DateUtil.IsCellDateFormatted(cell)
+                ? cell.DateCellValue?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? string.Empty
+                : FormatNumber(cell.NumericCellValue),
+            CellType.Formula => GetFormulaCellText(cell),
+            _ => string.Empty
+        };
+    }
+
+    private static string GetFormulaCellText(ICell cell)
+    {
+        return cell.CachedFormulaResultType switch
+        {
+            CellType.String => cell.StringCellValue ?? string.Empty,
+            CellType.Boolean => cell.BooleanCellValue ? "true" : "false",
+            CellType.Numeric => DateUtil.IsCellDateFormatted(cell)
+                ? cell.DateCellValue?.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) ?? string.Empty
+                : FormatNumber(cell.NumericCellValue),
+            _ => string.Empty
+        };
+    }
+
+    private static string FormatNumber(double value)
+    {
+        return Math.Abs(value % 1) < 0.0000001
+            ? value.ToString("0", CultureInfo.InvariantCulture)
+            : value.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private static List<List<string>> ParseCsvRows(string content)
+    {
+        var rows = new List<List<string>>();
+        var row = new List<string>();
+        var cell = new StringBuilder();
+        var inQuotes = false;
+
+        for (var i = 0; i < content.Length; i++)
+        {
+            var current = content[i];
+            if (current == '"')
+            {
+                if (inQuotes && i + 1 < content.Length && content[i + 1] == '"')
+                {
+                    cell.Append('"');
+                    i++;
+                }
+                else
+                {
+                    inQuotes = !inQuotes;
+                }
+            }
+            else if (current == ',' && !inQuotes)
+            {
+                row.Add(cell.ToString());
+                cell.Clear();
+            }
+            else if ((current == '\r' || current == '\n') && !inQuotes)
+            {
+                if (current == '\r' && i + 1 < content.Length && content[i + 1] == '\n') i++;
+                row.Add(cell.ToString());
+                cell.Clear();
+                if (row.Any(x => !string.IsNullOrWhiteSpace(x))) rows.Add(row);
+                row = new List<string>();
+            }
+            else
+            {
+                cell.Append(current);
+            }
+        }
+
+        row.Add(cell.ToString());
+        if (row.Any(x => !string.IsNullOrWhiteSpace(x))) rows.Add(row);
+        return rows;
+    }
+
+    private async Task<List<SysUserInfo>> GetImportUsersAsync()
+    {
+        if (!Db.DbMaintenance.IsAnyTable("sys_user_info")) return new List<SysUserInfo>();
+        return await Db.Queryable<SysUserInfo>().ToListAsync();
+    }
+
+    private static ProjectSaveDto BuildProjectFromImportRow(
+        List<string> headers,
+        List<string> row,
+        string? userId,
+        List<SysUserInfo> users)
+    {
+        string Read(params string[] aliases)
+        {
+            foreach (var alias in aliases.Select(NormalizeImportHeader))
+            {
+                var index = headers.FindIndex(x => x == alias);
+                if (index >= 0 && index < row.Count) return row[index].Trim();
+            }
+            return string.Empty;
+        }
+
+        var managerValue = Read("managerId", "managerUserId", "负责人ID", "负责人用户ID", "负责人", "manager");
+        var managerName = Read("managerName", "负责人名称", "负责人姓名", "managerName");
+        var resolvedManager = ResolveImportManager(managerValue, managerName, userId, users);
+
+        return new ProjectSaveDto
+        {
+            ProjectCode = Read("projectCode", "项目编号", "编号", "code"),
+            ProjectName = Read("projectName", "项目名称", "名称", "name"),
+            ProjectType = DefaultIfEmpty(Read("projectType", "项目类型", "类型", "type"), "验收"),
+            ProjectTag = EmptyToNull(Read("projectTag", "项目标签", "标签", "tag")),
+            Priority = ParsePriority(Read("priority", "优先级")),
+            ProjectStage = ParseStage(Read("projectStage", "项目阶段", "阶段", "stage")),
+            ProjectStatus = ParseProjectStatus(Read("projectStatus", "项目状态", "状态", "status")),
+            Progress = 0,
+            StartTime = ParseImportDate(Read("startTime", "开始时间", "开始日期", "start")),
+            EndTime = ParseImportDate(Read("endTime", "结束时间", "结束日期", "end")),
+            ManagerId = resolvedManager.UserId,
+            ManagerUserId = resolvedManager.UserId,
+            ManagerName = resolvedManager.Name,
+            CustomerName = EmptyToNull(Read("customerName", "客户名称", "客户")),
+            ContractCode = EmptyToNull(Read("contractCode", "合同号", "合同编号")),
+            Remark = EmptyToNull(Read("remark", "备注"))
+        };
+    }
+
+    private static List<string> ValidateImportedProject(
+        ProjectSaveDto project,
+        HashSet<string> existingCodes,
+        HashSet<string> importCodes)
+    {
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(project.ProjectCode)) errors.Add("项目编号不能为空");
+        if (string.IsNullOrWhiteSpace(project.ProjectName)) errors.Add("项目名称不能为空");
+        if (project.StartTime == default) errors.Add("开始时间不能为空或格式不正确");
+        if (project.EndTime == default) errors.Add("结束时间不能为空或格式不正确");
+        if (project.StartTime != default && project.EndTime != default && project.StartTime.Date > project.EndTime.Date)
+            errors.Add("开始时间不能晚于结束时间");
+        if (string.IsNullOrWhiteSpace(project.ManagerId)) errors.Add("负责人不能为空");
+        if (!string.IsNullOrWhiteSpace(project.ProjectCode) && existingCodes.Contains(project.ProjectCode))
+            errors.Add("项目编号已存在");
+        if (!string.IsNullOrWhiteSpace(project.ProjectCode) && !importCodes.Add(project.ProjectCode))
+            errors.Add("导入文件中项目编号重复");
+        return errors;
+    }
+
+    private static (string UserId, string Name) ResolveImportManager(
+        string managerValue,
+        string managerName,
+        string? fallbackUserId,
+        List<SysUserInfo> users)
+    {
+        var input = string.IsNullOrWhiteSpace(managerValue) ? managerName : managerValue;
+        var user = string.IsNullOrWhiteSpace(input)
+            ? null
+            : users.FirstOrDefault(x =>
+                string.Equals(x.UserId, input, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(x.UserName, input, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(x.NickName, input, StringComparison.OrdinalIgnoreCase));
+
+        if (user != null)
+            return (user.UserId, string.IsNullOrWhiteSpace(user.NickName) ? user.UserName : user.NickName);
+
+        if (!string.IsNullOrWhiteSpace(input))
+            return (input.Trim(), string.IsNullOrWhiteSpace(managerName) ? input.Trim() : managerName.Trim());
+
+        if (!string.IsNullOrWhiteSpace(fallbackUserId))
+        {
+            var fallback = users.FirstOrDefault(x => x.UserId == fallbackUserId);
+            return (fallbackUserId.Trim(), fallback == null ? fallbackUserId.Trim() : string.IsNullOrWhiteSpace(fallback.NickName) ? fallback.UserName : fallback.NickName);
+        }
+
+        return (string.Empty, string.Empty);
+    }
+
+    private static string NormalizeImportHeader(string value)
+    {
+        return (value ?? string.Empty)
+            .Trim()
+            .Replace(" ", string.Empty)
+            .Replace("_", string.Empty)
+            .Replace("-", string.Empty)
+            .ToLowerInvariant();
+    }
+
+    private static string DefaultIfEmpty(string value, string fallback)
+    {
+        return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+    }
+
+    private static string? EmptyToNull(string? value)
+    {
+        var text = value?.Trim();
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
+    private static DateTime ParseImportDate(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return default;
+        if (DateTime.TryParse(value, CultureInfo.CurrentCulture, DateTimeStyles.None, out var date)) return date;
+        if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out date)) return date;
+        if (double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var number) && number > 0)
+        {
+            try
+            {
+                return DateTime.FromOADate(number);
+            }
+            catch
+            {
+                return default;
+            }
+        }
+        return default;
+    }
+
+    private static byte ParsePriority(string value)
+    {
+        if (byte.TryParse(value, out var number) && number is >= 1 and <= 3) return number;
+        return value.Trim() switch
+        {
+            "高" or "高优先级" => 1,
+            "低" or "低优先级" => 3,
+            _ => 2
+        };
+    }
+
+    private static byte ParseStage(string value)
+    {
+        if (byte.TryParse(value, out var number) && number is >= 1 and <= 3) return number;
+        return value.Trim() switch
+        {
+            "启用" => 2,
+            "验收" => 3,
+            _ => 1
+        };
+    }
+
+    private static byte ParseProjectStatus(string value)
+    {
+        if (byte.TryParse(value, out var number) && number is >= 1 and <= 6) return number;
+        return value.Trim() switch
+        {
+            "进行中" => 2,
+            "延期" => 3,
+            "暂停" => 4,
+            "完成" or "已完成" => 5,
+            "归档" or "已归档" => 6,
+            _ => 1
+        };
     }
 
     private static void ApplyProject(ProjectSaveDto dto, ProjectEntity entity)
