@@ -291,11 +291,13 @@ namespace Service
                     entity.ParentId = "0";
                     entity.Path = menu.Path;                  // 父路由 path：/system
                     entity.Component = "/index/index";       // 固定组件
+                    entity.MetaTitle = $"menus.{menu.Label}.title";
                 }
                 else
                 {
                     // 【子路由】：自动获取父菜单 → 拼接 component
                     var parentPath = menu.ActivePath;
+                    var parentPathname = menu.ActivePath.Split('/').Last();
                     var parentMenu = await _db.GetConnection("calmadmin")
                                         .Queryable<sys_menu>()
                                         .Where(x => x.Path == parentPath && x.ParentId == "0")
@@ -306,11 +308,12 @@ namespace Service
                     entity.ParentId = parentMenu.MenuId;               // 父ID
                     entity.Path = menu.Path.Split('/').Last();            // 子路由 path：user
                     entity.Component = $"{parentPath}/{menu.Path.Split('/').Last()}"; // /system/user
+                    entity.MetaTitle = $"menus.{parentPath}.{entity.Path}";
                 }
 
                 // 基础字段映射
-                entity.MenuName = menu.Name;
-                entity.MetaTitle = menu.Label;
+                entity.MenuName = menu.Label;
+       
                 entity.MetaIcon = menu.Icon;
                 entity.Sort = menu.Sort;
                 entity.Status = menu.IsEnable;

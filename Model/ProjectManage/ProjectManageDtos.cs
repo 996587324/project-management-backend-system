@@ -107,8 +107,8 @@ public class TaskSaveDto
     public decimal Progress { get; set; }
     public byte TaskStatus { get; set; } = 1;
     public string ExecutorId { get; set; } = string.Empty;
-    public DateTime StartTime { get; set; }
-    public DateTime EndTime { get; set; }
+    public DateTime StartTime { get; set; } = DateTime.Now;
+    public DateTime EndTime { get; set; } = DateTime.Now;
     public int Sort { get; set; }
     public string? Remark { get; set; }
 }
@@ -117,7 +117,7 @@ public class TaskOutputDto : TaskSaveDto
 {
     public string? ProjectName { get; set; }
     public DateTime CreateTime { get; set; }
-    public DateTime? UpdateTime { get; set; }
+    public DateTime? UpdateTime { get; set; } = DateTime.Now;
     public List<TaskOutputDto> Children { get; set; } = new();
 }
 
@@ -160,7 +160,7 @@ public class ProjectFileSaveDto
 public class ProjectFileOutputDto : ProjectFileSaveDto
 {
     public int Id { get; set; }
-    public DateTime CreateTime { get; set; }
+    public DateTime CreateTime { get; set; } = DateTime.Now;
 }
 
 public class DashboardStatsDto

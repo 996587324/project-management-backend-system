@@ -1,9 +1,11 @@
 ﻿using Autofac;
 using Autofac.Extensions.DependencyInjection;
+using calmadmin.HostedServices;
 using Interface;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Model.Agent;
+using Model.EdgeGateway;
 using Model.Other;
 using Newtonsoft.Json;
 using Service;
@@ -30,6 +32,12 @@ namespace 上传MES.Config
             string conn6 = builder.Configuration.GetConnectionString("recipe_results_db_dcir");
             string conn7 = builder.Configuration.GetConnectionString("calmadmin");
             string conn8 = builder.Configuration.GetConnectionString("RoleMenuDb");
+            var edgeGatewayBootstrapOptions =
+                builder.Configuration.GetSection("EdgeGateway").Get<EdgeGatewayBootstrapOptions>()
+                ?? new EdgeGatewayBootstrapOptions();
+            var edgeDatabasePath = Path.GetFullPath(
+                edgeGatewayBootstrapOptions.DatabasePath,
+                AppContext.BaseDirectory);
             builder.Host.ConfigureContainer<ContainerBuilder>(builder =>
             {
 
@@ -107,6 +115,15 @@ namespace 上传MES.Config
                             DbType = DbType.SqlServer,
                             IsAutoCloseConnection = true,
                             InitKeyType = InitKeyType.Attribute
+                        },
+                        new ConnectionConfig
+                        {
+                            ConfigId = "edge-gateway",
+                            ConnectionString = $"Data Source={edgeDatabasePath}",
+                            DbType = DbType.Sqlite,
+                            // 本地队列只使用一个持续打开的连接，所有访问由单例数据库服务串行执行。
+                            IsAutoCloseConnection = false,
+                            InitKeyType = InitKeyType.Attribute
                         }
                     },
                     // AOP 配置在 ScopeConfig 回调里
@@ -130,9 +147,16 @@ namespace 上传MES.Config
             });
             //Automapper映射
             builder.Services.AddAutoMapper(typeof(AutoMapperConfigs));
+            // EdgeGateway 仅把连接中心所需的引导参数注册为单例；设备启停状态从数据库动态读取。
+            builder.Services.AddSingleton(edgeGatewayBootstrapOptions);
             //注册JWT
             builder.Services.Configure<JWTTokenOptions>(builder.Configuration.GetSection("JWTTokenOptions"));
             builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("AgentOptions"));
+            // 在 Worker 和自动转发循环启动前，只初始化一次 EdgeGateway 中心数据库结构。
+            builder.Services.AddHostedService<EdgeGatewayDatabaseInitializationHostedService>();
+            builder.Services.AddHostedService<EdgeGatewayHostedService>();
+            // 中心端自动扫描 SQL Server 队列并转发到 B 系统，运行开关和间隔来自数据库。
+            builder.Services.AddHostedService<EdgeBAutoForwardHostedService>();
             #region JWT校验
             //增加鉴权逻辑
             JWTTokenOptions tokenOptions = new JWTTokenOptions();
