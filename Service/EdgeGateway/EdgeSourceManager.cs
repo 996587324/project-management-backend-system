@@ -47,6 +47,9 @@ public class EdgeSourceManager : IEdgeSourceManager
             {
                 if (!desired.TryGetValue(current.Key, out var source))
                 {
+                    _logger.LogInformation(
+                        "Source {SourceId} is disabled or removed; stopping active connection",
+                        current.Key);
                     current.Value.Cancellation.Cancel();
                     stopping.Add(current.Value);
                     _runtimes.Remove(current.Key);
@@ -71,6 +74,9 @@ public class EdgeSourceManager : IEdgeSourceManager
                 var changed = current.Value.ConnectionFingerprint != GetConnectionFingerprint(source) ||
                               current.Value.SubscriptionFingerprint != GetSubscriptionFingerprint(source);
                 if (!changed) continue;
+                _logger.LogInformation(
+                    "Source {SourceId} configuration changed; rebuilding active connection",
+                    current.Key);
                 current.Value.Cancellation.Cancel();
                 stopping.Add(current.Value);
                 _runtimes.Remove(current.Key);

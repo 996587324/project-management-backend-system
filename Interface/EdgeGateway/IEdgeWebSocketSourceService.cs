@@ -9,7 +9,7 @@ public interface IEdgeWebSocketSourceService
 {
     /// <summary>查询指定设备下的全部未删除 WebSocket 配置。</summary>
     Task<List<EdgeWebSocketSourceOutputDto>> GetByDeviceAsync(int deviceId);
-    /// <summary>新增或修改 WebSocket 配置，并递增设备连接版本。</summary>
+    /// <summary>新增或修改 WebSocket 配置，并递增设备连接版本供配置同步循环识别。</summary>
     Task<int> SaveAsync(int deviceId, EdgeWebSocketSourceSaveDto dto);
     /// <summary>查询指定 WebSocket 连接的订阅设备和参数。</summary>
     Task<List<EdgeWebSocketSubscriptionDeviceOutputDto>> GetSubscriptionsAsync(int sourceId);
@@ -23,7 +23,7 @@ public interface IEdgeWebSocketSourceService
     Task<EdgeWebSocketReconnectResultDto> ReconnectDeviceAsync(int deviceId);
     /// <summary>提升所有设备已启用连接的运行版本，使在线 Worker 重新建立连接。</summary>
     Task<EdgeWebSocketReconnectResultDto> ReconnectAllAsync();
-    /// <summary>取得指定设备当前最高连接版本，供心跳版本比较使用。</summary>
+    /// <summary>取得指定设备当前最高连接版本，供配置同步循环比较使用。</summary>
     Task<int> GetVersionAsync(int deviceId);
     /// <summary>把中心实体映射为可直接下发给 Worker 的数据源配置。</summary>
     Task<List<SourceOptions>> GetEffectiveSourcesAsync(int deviceId);

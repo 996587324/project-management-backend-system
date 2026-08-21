@@ -34,18 +34,32 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
         Func<SourceEnvelope, CancellationToken, Task> onMessage,
         CancellationToken cancellationToken)
     {
+        var consecutiveFailures = 0;
         while (!cancellationToken.IsCancellationRequested)
         {
             ActiveWebSocket? active = null;
             try
             {
                 using var socket = new ClientWebSocket();
+                // 配置停用时 SourceManager 会取消令牌；主动 Abort 可立即打断正在等待数据的
+                // ReceiveAsync/ConnectAsync，确保物理连接及时释放，而不是继续等待服务端推送。
+                using var cancellationRegistration = cancellationToken.Register(
+                    static state => ((ClientWebSocket)state!).Abort(),
+                    socket);
                 ApplyHeaders(socket, source.HeadersJson);
 
                 // WebSocket 的实际建连位置。Endpoint 必须是 ws:// 或 wss:// 完整地址。
                 await socket.ConnectAsync(new Uri(source.Endpoint), cancellationToken);
                 active = new ActiveWebSocket(socket, source.SubscriptionDevices);
                 _activeConnections[source.Id] = active;
+                if (consecutiveFailures > 0)
+                {
+                    _logger.LogInformation(
+                        "WebSocket source {SourceId} recovered after {FailureCount} failed attempts",
+                        source.Id,
+                        consecutiveFailures);
+                    consecutiveFailures = 0;
+                }
                 _logger.LogInformation("WebSocket source {SourceId} connected", source.Id);
 
                 // 目标接口要求连接成功后立即发送订阅，否则不会推送实时数据。
@@ -58,9 +72,15 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
             {
                 break;
             }
+            catch (Exception) when (cancellationToken.IsCancellationRequested)
+            {
+                // Abort 可能以 WebSocketException 结束阻塞操作；主动停用不记录为连接故障。
+                break;
+            }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "WebSocket source {SourceId} disconnected", source.Id);
+                consecutiveFailures++;
+                LogConnectionFailure(source.Id, ex, consecutiveFailures);
             }
             finally
             {
@@ -76,6 +96,36 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
             // 非主动停止导致的断线会按连接自己的重连间隔继续尝试。
             await DelayReconnectAsync(source.ReconnectIntervalSeconds, cancellationToken);
         }
+
+        _logger.LogInformation("WebSocket source {SourceId} stopped and connection released", source.Id);
+    }
+
+    /// <summary>
+    /// 首次连续失败保留完整异常，之后仅定期输出摘要，避免不可达地址持续灌满控制台和 Windows 事件日志。
+    /// </summary>
+    private void LogConnectionFailure(string sourceId, Exception exception, int consecutiveFailures)
+    {
+        if (consecutiveFailures == 1)
+        {
+            _logger.LogWarning(exception, "WebSocket source {SourceId} disconnected", sourceId);
+            return;
+        }
+
+        if (consecutiveFailures % 10 == 0)
+        {
+            _logger.LogWarning(
+                "WebSocket source {SourceId} has failed {FailureCount} consecutive attempts: {ErrorMessage}",
+                sourceId,
+                consecutiveFailures,
+                exception.Message);
+            return;
+        }
+
+        _logger.LogDebug(
+            "WebSocket source {SourceId} reconnect attempt {FailureCount} failed: {ErrorMessage}",
+            sourceId,
+            consecutiveFailures,
+            exception.Message);
     }
 
     /// <summary>
@@ -127,6 +177,8 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
 
             if (result.MessageType == WebSocketMessageType.Close) break;
             if (result.MessageType != WebSocketMessageType.Text) continue;
+            // 停用与收到完整报文可能同时发生，分发前再次检查可阻止尾包进入处理队列。
+            cancellationToken.ThrowIfCancellationRequested();
             var payload = Encoding.UTF8.GetString(stream.ToArray());
             await DispatchPayloadAsync(source, active, payload, onMessage, cancellationToken);
         }

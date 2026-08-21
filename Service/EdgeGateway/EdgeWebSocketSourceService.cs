@@ -23,22 +23,28 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
         _mapper = mapper;
     }
 
-    /// <summary>查询指定设备全部未删除连接，并映射为前端输出 DTO。</summary>
+    /// <summary>
+    /// 查询指定设备全部未删除连接，并根据中心队列最后一次有效数据时间计算连接接收状态。
+    /// </summary>
     public async Task<List<EdgeWebSocketSourceOutputDto>> GetByDeviceAsync(int deviceId)
     {
-        await EnsureDeviceAsync(deviceId);
+        var device = await Db.Queryable<EdgeDeviceEntity>()
+            .FirstAsync(x => x.Id == deviceId && x.IsDelete == 0);
+        if (device == null) throw new InvalidOperationException("设备不存在");
+
         var entities = await Db.Queryable<EdgeWebSocketSourceEntity>()
             .Where(x => x.DeviceId == deviceId && x.IsDelete == 0)
             .OrderByDescending(x => x.Enabled)
             .OrderBy(x => x.CreateTime)
             .ToListAsync();
         var result = _mapper.Map<List<EdgeWebSocketSourceOutputDto>>(entities);
+        await AttachDataReceptionStatusAsync(device, result);
         await AttachSubscriptionsAsync(result);
         return result;
     }
 
     /// <summary>
-    /// 新增或修改连接。每次保存都会生成更高版本，使在线 Worker 在心跳时应用变化。
+    /// 新增或修改连接。每次保存都会生成更高版本，使 Worker 在配置同步时应用变化。
     /// </summary>
     public async Task<int> SaveAsync(int deviceId, EdgeWebSocketSourceSaveDto dto)
     {
@@ -166,7 +172,7 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
         return true;
     }
 
-    /// <summary>软删除单个连接，使边缘 Worker 在下次心跳停止它。</summary>
+    /// <summary>软删除单个连接，使边缘 Worker 在下次配置同步时停止它。</summary>
     public async Task<bool> DeleteAsync(int id)
     {
         var entity = await Db.Queryable<EdgeWebSocketSourceEntity>()
@@ -307,6 +313,50 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
             source.SubscriptionDevices = await BuildSubscriptionOutputsAsync(source.Id);
     }
 
+    /// <summary>
+    /// 按边缘设备编码和数据源标识查询最后一次中心入队时间，并转换成连接配置的数据接收状态。
+    /// </summary>
+    private async Task AttachDataReceptionStatusAsync(
+        EdgeDeviceEntity device,
+        List<EdgeWebSocketSourceOutputDto> sources)
+    {
+        var sourceIds = sources.Select(x => x.SourceId).Distinct().ToList();
+        var lastDataTimeMap = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        if (sourceIds.Count > 0)
+        {
+            var latestRows = await Db.Queryable<EdgeMessageQueueEntity>()
+                .Where(x => x.DeviceCode == device.DeviceCode && sourceIds.Contains(x.SourceId))
+                .GroupBy(x => x.SourceId)
+                .Select(x => new
+                {
+                    x.SourceId,
+                    LastDataTime = SqlFunc.AggregateMax(x.CreateTime)
+                })
+                .ToListAsync();
+            lastDataTimeMap = latestRows.ToDictionary(
+                x => x.SourceId,
+                x => x.LastDataTime,
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        var onlineDeadline = DateTime.Now.Subtract(EdgeGatewayDataReception.OnlineWindow);
+        foreach (var source in sources)
+        {
+            source.LastDataTime = lastDataTimeMap.TryGetValue(source.SourceId, out var lastDataTime)
+                ? lastDataTime
+                : null;
+            var effectiveEnabled = device.Enabled && source.Enabled;
+            source.DataOnline = effectiveEnabled && source.LastDataTime >= onlineDeadline;
+            source.DataStatus = !effectiveEnabled
+                ? EdgeGatewayDataReception.Disabled
+                : source.DataOnline
+                    ? EdgeGatewayDataReception.Receiving
+                    : source.LastDataTime.HasValue
+                        ? EdgeGatewayDataReception.Interrupted
+                        : EdgeGatewayDataReception.NeverReceived;
+        }
+    }
+
     /// <summary>从两张订阅子表组装单个连接的嵌套输出 DTO。</summary>
     private async Task<List<EdgeWebSocketSubscriptionDeviceOutputDto>> BuildSubscriptionOutputsAsync(int sourceId)
     {
@@ -366,14 +416,13 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
             ValidateHeaders(dto.HeadersJson);
     }
 
-    /// <summary>校验订阅设备、参数数量、长度和同级唯一性。</summary>
+    /// <summary>校验订阅设备数量、单设备参数数量、字段长度和同级唯一性。</summary>
     private static void ValidateSubscriptions(EdgeWebSocketSubscriptionSaveDto dto)
     {
         if (dto.Devices.Count == 0) throw new InvalidOperationException("至少需要配置一个订阅设备");
         if (dto.Devices.Count > 500) throw new InvalidOperationException("单个连接最多配置 500 个订阅设备");
 
         var deviceCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var totalParameterCount = 0;
         var enabledDeviceCount = 0;
         foreach (var device in dto.Devices)
         {
@@ -414,7 +463,6 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
                 if (!parameterNames.Add(parameter.ParameterName))
                     throw new InvalidOperationException($"设备 {device.DeviceCode} 的参数重复：{parameter.ParameterName}");
                 if (parameter.Enabled) enabledParameterCount++;
-                totalParameterCount++;
             }
             if (device.Enabled)
             {
@@ -425,8 +473,6 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
         }
         if (enabledDeviceCount == 0)
             throw new InvalidOperationException("至少需要启用一个订阅设备");
-        if (totalParameterCount > 5000)
-            throw new InvalidOperationException("单个连接的订阅参数总数不能超过 5000 个");
     }
 
     /// <summary>根据结构化订阅 DTO 生成上游接口要求的 devices JSON。</summary>

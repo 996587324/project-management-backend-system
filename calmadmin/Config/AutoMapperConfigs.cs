@@ -121,7 +121,10 @@ namespace 上传MES.Config
                 .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
                 .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
 
-            CreateMap<EdgeWebSocketSourceEntity, EdgeWebSocketSourceOutputDto>(MemberList.None);
+            CreateMap<EdgeWebSocketSourceEntity, EdgeWebSocketSourceOutputDto>(MemberList.None)
+                .ForMember(dest => dest.DataOnline, opt => opt.Ignore())
+                .ForMember(dest => dest.DataStatus, opt => opt.Ignore())
+                .ForMember(dest => dest.LastDataTime, opt => opt.Ignore());
 
             CreateMap<EdgeWebSocketSubscriptionDeviceSaveDto, EdgeWebSocketSubscriptionDeviceEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())
@@ -215,6 +218,10 @@ namespace 上传MES.Config
             CreateMap<EdgeBMappingSaveDto, EdgeBMappingRuleEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())
                 .ForMember(dest => dest.PayloadTemplateName, opt => opt.Ignore())
+                .ForMember(dest => dest.SourceId, opt => opt.MapFrom(src =>
+                    string.IsNullOrWhiteSpace(src.SourceId) ? null : src.SourceId.Trim()))
+                .ForMember(dest => dest.SourceDeviceCode, opt => opt.MapFrom(src =>
+                    string.IsNullOrWhiteSpace(src.SourceDeviceCode) ? null : src.SourceDeviceCode.Trim()))
                 .ForMember(dest => dest.MappingName, opt => opt.MapFrom(src => src.MappingName.Trim()))
                 .ForMember(dest => dest.Protocol, opt => opt.MapFrom(src =>
                     string.IsNullOrWhiteSpace(src.Protocol) ? "HTTP" : src.Protocol.Trim().ToUpperInvariant()))
@@ -266,6 +273,35 @@ namespace 上传MES.Config
 
             CreateMap<EdgeBAutoForwardSettingEntity, EdgeBAutoForwardSettingOutputDto>(MemberList.None);
 
+            CreateMap<EdgeGatewayFeatureSettingSaveDto, EdgeGatewayFeatureSettingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdatedBy, opt => opt.MapFrom(src =>
+                    string.IsNullOrWhiteSpace(src.UpdatedBy) ? null : src.UpdatedBy.Trim()))
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+
+            CreateMap<EdgeGatewayFeatureSettingEntity, EdgeGatewayFeatureSettingOutputDto>(MemberList.None);
+
+            CreateMap<EdgeRealtimeSnapshotWriteModel, EdgeRealtimeDeviceSnapshotEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DataListJson, opt => opt.MapFrom(src =>
+                    JsonConvert.SerializeObject(src.DataList, Formatting.None)))
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore());
+
+            CreateMap<EdgeRealtimeDeviceSnapshotEntity, EdgeRealtimeSnapshotOutputDto>(MemberList.None)
+                .ForMember(dest => dest.DeviceMark, opt => opt.MapFrom(src => src.DeviceCode))
+                .ForMember(dest => dest.Time, opt => opt.MapFrom(src => src.SourceTimestamp))
+                .ForMember(dest => dest.DataList, opt => opt.MapFrom(src =>
+                    DeserializeRealtimeDataList(src.DataListJson)))
+                .ForMember(dest => dest.Data, opt => opt.MapFrom(src =>
+                    DeserializeRealtimeData(src.DataListJson)))
+                .ForMember(dest => dest.DataOnline, opt => opt.MapFrom(src =>
+                    src.ReceiveTime >= DateTime.Now.Subtract(EdgeRealtimeDataReception.OnlineWindow)))
+                .ForMember(dest => dest.DataStatus, opt => opt.MapFrom(src =>
+                    src.ReceiveTime >= DateTime.Now.Subtract(EdgeRealtimeDataReception.OnlineWindow)
+                        ? EdgeRealtimeDataReception.Receiving
+                        : EdgeRealtimeDataReception.Interrupted));
+
             CreateMap<EdgeEventReportDto, EdgeSystemEventEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())
                 .ForMember(dest => dest.CreateTime, opt => opt.MapFrom(_ => DateTime.Now));
@@ -273,6 +309,8 @@ namespace 上传MES.Config
             CreateMap<EdgeMessageQueueEntity, EdgeUploadRecordEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())
                 .ForMember(dest => dest.QueueId, opt => opt.MapFrom(src => src.Id))
+                .ForMember(dest => dest.MappingRuleId, opt => opt.Ignore())
+                .ForMember(dest => dest.MappingName, opt => opt.Ignore())
                 .ForMember(dest => dest.TargetUrl, opt => opt.Ignore())
                 .ForMember(dest => dest.Success, opt => opt.Ignore())
                 .ForMember(dest => dest.StatusCode, opt => opt.Ignore())
@@ -331,5 +369,13 @@ namespace 上传MES.Config
                 .ForMember(dest => dest.ErrorMessage, opt => opt.Ignore())
                 .ForMember(dest => dest.CreateTime, opt => opt.Ignore());
         }
+
+        /// <summary>把数据库中的动态数据 JSON 还原为兼容列表。</summary>
+        private static List<EdgeRealtimeDataItemDto> DeserializeRealtimeDataList(string json) =>
+            JsonConvert.DeserializeObject<List<EdgeRealtimeDataItemDto>>(json) ?? [];
+
+        /// <summary>从兼容列表提取新上报信封使用的动态 data 对象。</summary>
+        private static Dictionary<string, object?> DeserializeRealtimeData(string json) =>
+            DeserializeRealtimeDataList(json).FirstOrDefault()?.Data ?? [];
     }
 }

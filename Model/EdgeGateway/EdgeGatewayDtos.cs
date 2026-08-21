@@ -55,13 +55,21 @@ public class EdgeDeviceOutputDto : EdgeDeviceSaveDto
     public DateTime? UpdateTime { get; set; }
 }
 
-/// <summary>运行中心首页的设备、队列、告警和上传统计。</summary>
+/// <summary>运行中心首页的设备、连接接收、队列、告警和上传统计。</summary>
 public class EdgeOverviewDto
 {
     public int DeviceCount { get; set; }
     public int OnlineCount { get; set; }
     public int OfflineCount { get; set; }
     public int DisabledCount { get; set; }
+    /// <summary>未删除的 WebSocket 连接配置总数。</summary>
+    public int ConnectionCount { get; set; }
+    /// <summary>最近 60 秒内成功收到有效数据的连接配置数。</summary>
+    public int ReceivingConnectionCount { get; set; }
+    /// <summary>已启用但最近 60 秒未收到有效数据的连接配置数。</summary>
+    public int NoDataConnectionCount { get; set; }
+    /// <summary>连接自身或所属边缘设备已停用的连接配置数。</summary>
+    public int DisabledConnectionCount { get; set; }
     public int QueueDepth { get; set; }
     public int FailedCount { get; set; }
     public int ActiveAlarmCount { get; set; }
@@ -116,6 +124,12 @@ public class EdgeWebSocketSourceOutputDto : EdgeWebSocketSourceSaveDto
     public int DeviceId { get; set; }
     public int Version { get; set; }
     public int SubscriptionVersion { get; set; }
+    /// <summary>连接配置是否在最近 60 秒内成功收到有效数据。</summary>
+    public bool DataOnline { get; set; }
+    /// <summary>Receiving、Interrupted、NeverReceived 或 Disabled。</summary>
+    public string DataStatus { get; set; } = EdgeGatewayDataReception.NeverReceived;
+    /// <summary>中心端最后一次成功接收该连接有效数据的时间。</summary>
+    public DateTime? LastDataTime { get; set; }
     public List<EdgeWebSocketSubscriptionDeviceOutputDto> SubscriptionDevices { get; set; } = new();
     public DateTime CreateTime { get; set; }
     public DateTime? UpdateTime { get; set; }
@@ -282,6 +296,11 @@ public class EdgeRetryRequestDto
 }
 
 /// <summary>中心队列批量处理结果。</summary>
+public class EdgeBatchIdsDto
+{
+    public List<long> Ids { get; set; } = new();
+}
+
 public class EdgeRetryResultDto
 {
     public int RequestedCount { get; set; }
@@ -312,6 +331,8 @@ public class EdgeBMappingSaveDto
 {
     public int Id { get; set; }
     public int? DeviceId { get; set; }
+    public string? SourceId { get; set; }
+    public string? SourceDeviceCode { get; set; }
     public string MappingName { get; set; } = string.Empty;
     public int? PayloadTemplateId { get; set; }
     public string Protocol { get; set; } = "HTTP";
@@ -333,6 +354,8 @@ public class EdgeBMappingOutputDto
 {
     public int Id { get; set; }
     public int? DeviceId { get; set; }
+    public string? SourceId { get; set; }
+    public string? SourceDeviceCode { get; set; }
     public string MappingName { get; set; } = string.Empty;
     public int? PayloadTemplateId { get; set; }
     public string? PayloadTemplateName { get; set; }
@@ -399,8 +422,55 @@ public class EdgeBAutoForwardSettingOutputDto
     public DateTime? UpdateTime { get; set; }
 }
 
+/// <summary>保存边缘计算中心全局功能开关。</summary>
+public sealed class EdgeGatewayFeatureSettingSaveDto
+{
+    public bool Enabled { get; set; }
+    public string? UpdatedBy { get; set; }
+}
+
+/// <summary>边缘计算中心全局功能开关及最后修改信息。</summary>
+public sealed class EdgeGatewayFeatureSettingOutputDto
+{
+    public bool Enabled { get; set; } = true;
+    public string? UpdatedBy { get; set; }
+    public DateTime? UpdateTime { get; set; }
+}
+
 /// <summary>通用启用状态请求模型。</summary>
 public class EdgeEnabledDto
 {
     public bool Enabled { get; set; }
+}
+
+public class EdgeGatewayTemplateFileDto
+{
+    public string FileName { get; set; } = "edge-gateway-template.xlsx";
+    public string ContentType { get; set; } = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    public byte[] Content { get; set; } = Array.Empty<byte>();
+}
+
+/// <summary>边缘网关配置流式下载文件，内容流关闭后自动清理服务器临时文件。</summary>
+public sealed class EdgeGatewayTemplateStreamDto
+{
+    public string FileName { get; set; } = "edge-gateway-template.xlsx";
+    public string ContentType { get; set; } = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    public Stream Content { get; set; } = Stream.Null;
+}
+
+public class EdgeGatewayImportResultDto
+{
+    public int Total { get; set; }
+    public int SuccessCount { get; set; }
+    public int FailedCount { get; set; }
+    public string Message { get; set; } = string.Empty;
+    public List<EdgeGatewayImportFailureDto> Failures { get; set; } = new();
+}
+
+public class EdgeGatewayImportFailureDto
+{
+    public string SheetName { get; set; } = string.Empty;
+    public int RowIndex { get; set; }
+    public string Key { get; set; } = string.Empty;
+    public string Reason { get; set; } = string.Empty;
 }

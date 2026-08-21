@@ -48,7 +48,10 @@ public sealed class EdgeGatewayDatabaseInitializer : IEdgeGatewayDatabaseInitial
             _db.CodeFirst.InitTables<EdgeRuleVersionEntity, EdgeMessageQueueEntity,
                 EdgeUploadRecordEntity, EdgeSystemEventEntity, EdgeAlarmRecordEntity>();
             _db.CodeFirst.InitTables<EdgeOperationLogEntity, EdgeBMappingRuleEntity,
-                EdgeBPayloadTemplateEntity, EdgeBAutoForwardSettingEntity>();
+                EdgeBPayloadTemplateEntity, EdgeBAutoForwardSettingEntity,
+                EdgeGatewayFeatureSettingEntity>();
+            _databaseMaintenanceService.PrepareRealtimeSnapshotSchema();
+            _db.CodeFirst.InitTables<EdgeRealtimeDeviceSnapshotEntity>();
             _databaseMaintenanceService.EnsureLargeTableIndexes();
 
             _initialized = true;

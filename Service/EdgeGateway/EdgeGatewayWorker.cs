@@ -8,10 +8,11 @@ using Model.EdgeGateway;
 namespace Service;
 
 /// <summary>
-/// 边缘网关后台主循环，协调数据源采集、本地队列上传、心跳和配置热更新。
+/// 边缘网关后台主循环，协调数据源采集、本地队列上传和数据库配置热更新。
 /// </summary>
 public class EdgeGatewayWorker : IEdgeGatewayWorker
 {
+    private const int ConfigurationRefreshIntervalSeconds = 10;
     private readonly EdgeGatewayBootstrapOptions _bootstrapOptions;
     private readonly IEdgeQueueStore _store;
     private readonly IEdgeMessageProcessor _processor;
@@ -43,7 +44,7 @@ public class EdgeGatewayWorker : IEdgeGatewayWorker
     }
 
     /// <summary>
-    /// 初始化边缘存储和数据源，然后并行运行上传及心跳循环。
+    /// 初始化边缘存储和数据源，然后并行运行上传及配置同步循环。
     /// </summary>
     public async Task RunAsync(CancellationToken stoppingToken)
     {
@@ -58,7 +59,7 @@ public class EdgeGatewayWorker : IEdgeGatewayWorker
         var tasks = new[]
         {
             RunUploadLoopAsync(stoppingToken),
-            RunHeartbeatLoopAsync(stoppingToken)
+            RunConfigurationRefreshLoopAsync(stoppingToken)
         };
         try
         {
@@ -81,10 +82,10 @@ public class EdgeGatewayWorker : IEdgeGatewayWorker
             await ApplyEffectiveConfigurationAsync(configuration, true, cancellationToken);
             if (!configuration.Enabled)
                 _logger.LogInformation(
-                    "Edge gateway device {DeviceId} is disabled by database configuration; heartbeat remains active.",
+                    "Edge gateway device {DeviceId} is disabled by database configuration; configuration synchronization remains active.",
                     _bootstrapOptions.DeviceId);
             else if (!configuration.Sources.Any(x => x.Enabled))
-                _logger.LogWarning("No database WebSocket source is enabled. Upload and heartbeat loops are still running.");
+                _logger.LogWarning("No database WebSocket source is enabled. Upload and configuration loops are still running.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
@@ -156,7 +157,50 @@ public class EdgeGatewayWorker : IEdgeGatewayWorker
     }
 
     /// <summary>
-    /// 上报设备状态，比较中心版本，并热更新连接、字段映射和边缘规则。
+    /// 定时读取中心数据库的完整生效配置；版本或启停状态变化时热更新数据源、映射和规则。
+    /// 该循环不发送设备心跳，连接运行状态由中心端收到的有效数据判定。
+    /// </summary>
+    private async Task RunConfigurationRefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                var configuration = await _centerApi.GetEffectiveConfigurationAsync(cancellationToken);
+                var enabledChanged = configuration.Enabled != Volatile.Read(ref _gatewayEnabled);
+                var versionChanged = configuration.ConfigVersion > _configVersion ||
+                                     configuration.RuleVersion > _ruleVersion ||
+                                     configuration.SourceVersion > _sourceVersion;
+                if (enabledChanged || versionChanged)
+                {
+                    await ApplyEffectiveConfigurationAsync(configuration, enabledChanged, cancellationToken);
+                    await _store.RecordEventAsync(
+                        "Info",
+                        enabledChanged
+                            ? configuration.Enabled ? "Gateway.Enabled" : "Gateway.Disabled"
+                            : "Config.Applied",
+                        enabledChanged
+                            ? configuration.Enabled ? "数据库已启用边缘网关，采集和上传已恢复" : "数据库已停用边缘网关，采集和上传已暂停"
+                            : "中心配置、规则与连接已热更新",
+                        new { _configVersion, _ruleVersion, _sourceVersion },
+                        cancellationToken);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.Message;
+                _logger.LogWarning(ex, "EdgeGateway configuration synchronization failed");
+            }
+            await DelayAsync(ConfigurationRefreshIntervalSeconds, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// 兼容旧部署的设备心跳实现；当前 Worker 不启动此循环。
     /// </summary>
     private async Task RunHeartbeatLoopAsync(CancellationToken cancellationToken)
     {

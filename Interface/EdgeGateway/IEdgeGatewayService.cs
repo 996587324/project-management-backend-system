@@ -9,6 +9,12 @@ public interface IEdgeGatewayService
 {
     /// <summary>获取边缘网关运行概览。</summary>
     Task<EdgeOverviewDto> GetOverviewAsync();
+    /// <summary>生成配置工作簿并以可顺序读取的文件流返回，供 HTTP 大文件下载使用。</summary>
+    Task<EdgeGatewayTemplateStreamDto> ExportConfigurationTemplateStreamAsync(
+        bool includeData,
+        CancellationToken cancellationToken = default);
+    Task<EdgeGatewayTemplateFileDto> ExportConfigurationTemplateAsync(bool includeData);
+    Task<EdgeGatewayImportResultDto> ImportConfigurationAsync(string fileName, Stream stream, string? operatorName);
     /// <summary>分页查询中心端登记的边缘设备。</summary>
     Task<EdgePagedResultDto<EdgeDeviceOutputDto>> GetDevicePageAsync(EdgeDeviceQueryDto query);
     /// <summary>新增或修改边缘设备基础信息。</summary>
@@ -50,6 +56,7 @@ public interface IEdgeGatewayService
     Task<EdgeMessageAcceptResultDto> ReceiveMessagesAsync(EdgeMessageBatchDto dto);
     /// <summary>将失败队列重置为待处理状态。</summary>
     Task<int> ResetQueueAsync(EdgeRetryRequestDto dto);
+    Task<int> DeleteQueueAsync(EdgeBatchIdsDto dto);
     /// <summary>把指定中心队列消息转换并转发到 B 系统。</summary>
     Task<EdgeRetryResultDto> ForwardQueueAsync(EdgeRetryRequestDto dto);
     /// <summary>按重试时间读取到期消息，供中心端自动转发服务调用。</summary>
@@ -63,4 +70,5 @@ public interface IEdgeGatewayService
     Task<List<EdgeBMappingOutputDto>> GetBMappingRulesAsync();
     /// <summary>新增或修改 B 系统映射配置。</summary>
     Task<int> SaveBMappingRuleAsync(EdgeBMappingSaveDto dto);
+    Task<int> DeleteBMappingRulesAsync(EdgeBatchIdsDto dto);
 }

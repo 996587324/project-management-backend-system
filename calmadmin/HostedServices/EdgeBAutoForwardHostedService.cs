@@ -8,14 +8,17 @@ namespace calmadmin.HostedServices;
 public class EdgeBAutoForwardHostedService : BackgroundService
 {
     private readonly IEdgeBAutoForwardService _autoForwardService;
+    private readonly IEdgeGatewayFeatureService _featureService;
     private readonly ILogger<EdgeBAutoForwardHostedService> _logger;
 
     /// <summary>通过 IOC 获取自动转发业务服务和日志组件。</summary>
     public EdgeBAutoForwardHostedService(
         IEdgeBAutoForwardService autoForwardService,
+        IEdgeGatewayFeatureService featureService,
         ILogger<EdgeBAutoForwardHostedService> logger)
     {
         _autoForwardService = autoForwardService;
+        _featureService = featureService;
         _logger = logger;
     }
 
@@ -28,10 +31,13 @@ public class EdgeBAutoForwardHostedService : BackgroundService
             try
             {
                 var setting = await _autoForwardService.RunOnceAsync(stoppingToken);
+                var featureEnabled = await _featureService.IsEnabledAsync();
                 var configuredDelay = Math.Clamp(setting.ScanIntervalSeconds, 1, 300);
-                // 停用时最多 5 秒检查一次数据库，使前端重新启用后无需等待较长的旧间隔。
-                delaySeconds = setting.Enabled ? configuredDelay : Math.Min(configuredDelay, 5);
-                if (setting.Enabled && setting.LastRequestedCount > 0)
+                // 任一开关停用时最多 5 秒检查一次数据库，使前端重新启用后可以快速恢复。
+                delaySeconds = setting.Enabled && featureEnabled
+                    ? configuredDelay
+                    : Math.Min(configuredDelay, 5);
+                if (setting.Enabled && featureEnabled && setting.LastRequestedCount > 0)
                 {
                     _logger.LogInformation(
                         "B system auto-forward completed. Requested: {Requested}, Success: {Success}, Failed: {Failed}.",

@@ -157,6 +157,8 @@ namespace 上传MES.Config
             builder.Services.AddHostedService<EdgeGatewayHostedService>();
             // 中心端自动扫描 SQL Server 队列并转发到 B 系统，运行开关和间隔来自数据库。
             builder.Services.AddHostedService<EdgeBAutoForwardHostedService>();
+            // 日志中心仅保留最近七天的运行事件，启动时清理一次，之后每天清理一次。
+            builder.Services.AddHostedService<EdgeGatewayLogCleanupHostedService>();
             #region JWT校验
             //增加鉴权逻辑
             JWTTokenOptions tokenOptions = new JWTTokenOptions();

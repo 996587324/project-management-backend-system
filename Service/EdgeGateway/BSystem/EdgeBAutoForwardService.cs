@@ -14,6 +14,7 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     private const int SettingId = 1;
     private readonly SqlSugarScope _dbScope;
     private readonly IEdgeGatewayService _edgeGatewayService;
+    private readonly IEdgeGatewayFeatureService _featureService;
     private readonly IMapper _mapper;
     private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
@@ -21,10 +22,12 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     public EdgeBAutoForwardService(
         SqlSugarScope dbScope,
         IEdgeGatewayService edgeGatewayService,
+        IEdgeGatewayFeatureService featureService,
         IMapper mapper)
     {
         _dbScope = dbScope;
         _edgeGatewayService = edgeGatewayService;
+        _featureService = featureService;
         _mapper = mapper;
     }
 
@@ -62,6 +65,8 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     {
         var setting = await GetOrCreateSettingAsync();
         if (!setting.Enabled) return _mapper.Map<EdgeBAutoForwardSettingOutputDto>(setting);
+        if (!await _featureService.IsEnabledAsync())
+            return _mapper.Map<EdgeBAutoForwardSettingOutputDto>(setting);
 
         try
         {

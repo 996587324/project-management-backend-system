@@ -233,6 +233,18 @@ public class EdgeUploadRecordEntity
     public string MessageId { get; set; } = string.Empty;
     [SugarColumn(Length = 64)]
     public string DeviceCode { get; set; } = string.Empty;
+    /// <summary>产生本次投递消息的数据源标识。</summary>
+    [SugarColumn(Length = 64, IsNullable = true)]
+    public string? SourceId { get; set; }
+    /// <summary>WebSocket 返回报文外层的订阅设备代码。</summary>
+    [SugarColumn(Length = 128, IsNullable = true)]
+    public string? SourceDeviceCode { get; set; }
+    /// <summary>本次投递实际命中的 B 系统映射主键。</summary>
+    [SugarColumn(IsNullable = true)]
+    public int? MappingRuleId { get; set; }
+    /// <summary>本次投递实际命中的 B 系统映射名称快照。</summary>
+    [SugarColumn(Length = 128, IsNullable = true)]
+    public string? MappingName { get; set; }
     [SugarColumn(Length = 512, IsNullable = true)]
     public string? TargetUrl { get; set; }
     public bool Success { get; set; }
@@ -312,6 +324,12 @@ public class EdgeBMappingRuleEntity
     [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
     public int Id { get; set; }
     public int? DeviceId { get; set; }
+    /// <summary>精确订阅设备映射所属的数据源；为空表示节点或全局默认映射。</summary>
+    [SugarColumn(Length = 64, IsNullable = true)]
+    public string? SourceId { get; set; }
+    /// <summary>精确订阅设备映射使用的 deviceCode；为空表示节点或全局默认映射。</summary>
+    [SugarColumn(Length = 128, IsNullable = true)]
+    public string? SourceDeviceCode { get; set; }
     [SugarColumn(Length = 128)]
     public string MappingName { get; set; } = string.Empty;
     public int? PayloadTemplateId { get; set; }
@@ -381,5 +399,18 @@ public class EdgeBAutoForwardSettingEntity
     public int LastRequestedCount { get; set; }
     public int LastSuccessCount { get; set; }
     public int LastFailedCount { get; set; }
+    public DateTime? UpdateTime { get; set; } = DateTime.Now;
+}
+
+/// <summary>中心 SQL Server 中边缘计算中心全局启停单例设置。</summary>
+[SugarTable("EdgeGatewayFeatureSetting")]
+public sealed class EdgeGatewayFeatureSettingEntity
+{
+    [SugarColumn(IsPrimaryKey = true)]
+    public int Id { get; set; } = 1;
+    public bool Enabled { get; set; } = true;
+    [SugarColumn(Length = 64, IsNullable = true)]
+    public string? UpdatedBy { get; set; }
+    public DateTime CreateTime { get; set; } = DateTime.Now;
     public DateTime? UpdateTime { get; set; } = DateTime.Now;
 }

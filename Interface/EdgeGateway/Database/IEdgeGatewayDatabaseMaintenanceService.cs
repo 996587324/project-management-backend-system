@@ -5,6 +5,9 @@ namespace Interface;
 /// </summary>
 public interface IEdgeGatewayDatabaseMaintenanceService
 {
+    /// <summary>在 CodeFirst 更新实时暂存表前，移除依赖旧 WebSocket 路由字段的索引。</summary>
+    void PrepareRealtimeSnapshotSchema();
+
     /// <summary>确保消息、上传、事件、告警和操作日志表具备高频查询所需索引。</summary>
     void EnsureLargeTableIndexes();
 }

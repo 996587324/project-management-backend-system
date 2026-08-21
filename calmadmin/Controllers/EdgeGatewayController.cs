@@ -15,6 +15,7 @@ public class EdgeGatewayController : ControllerBase
     private readonly IEdgeWebSocketSourceService _webSocketSourceService;
     private readonly IEdgeBPayloadTemplateService _bPayloadTemplateService;
     private readonly IEdgeBAutoForwardService _bAutoForwardService;
+    private readonly IEdgeGatewayFeatureService _featureService;
     private readonly string? _machineApiKey;
 
     public EdgeGatewayController(
@@ -22,18 +23,59 @@ public class EdgeGatewayController : ControllerBase
         IEdgeWebSocketSourceService webSocketSourceService,
         IEdgeBPayloadTemplateService bPayloadTemplateService,
         IEdgeBAutoForwardService bAutoForwardService,
+        IEdgeGatewayFeatureService featureService,
         IConfiguration configuration)
     {
         _service = service;
         _webSocketSourceService = webSocketSourceService;
         _bPayloadTemplateService = bPayloadTemplateService;
         _bAutoForwardService = bAutoForwardService;
+        _featureService = featureService;
         _machineApiKey = configuration["EdgeGateway:ApiKey"];
     }
 
     /// <summary>获取边缘网关运行概览。</summary>
     [HttpGet("overview")]
     public async Task<IActionResult> GetOverview() => Success(await _service.GetOverviewAsync());
+
+    /// <summary>查询数据库中的边缘计算中心全局启停状态。</summary>
+    [HttpGet("feature-setting")]
+    public async Task<IActionResult> GetFeatureSetting() =>
+        Success(await _featureService.GetSettingAsync());
+
+    /// <summary>保存全局启停状态；关闭后 Worker 在配置同步周期内释放采集连接。</summary>
+    [HttpPost("feature-setting")]
+    public async Task<IActionResult> SaveFeatureSetting(
+        [FromBody] EdgeGatewayFeatureSettingSaveDto dto) =>
+        await ExecuteAsync(
+            () => _featureService.SaveSettingAsync(dto),
+            dto.Enabled ? "边缘计算中心已开启" : "边缘计算中心已关闭");
+
+    /// <summary>下载边缘网关统一配置模板，可选择是否携带当前已配置数据。</summary>
+    [HttpGet("configuration-template")]
+    public async Task<IActionResult> DownloadConfigurationTemplate([FromQuery] bool includeData = false)
+    {
+        var file = await _service.ExportConfigurationTemplateStreamAsync(
+            includeData,
+            HttpContext.RequestAborted);
+        // 告知 Nginx 不缓存该响应，使生成后的文件可以立即向浏览器持续传输。
+        Response.Headers["X-Accel-Buffering"] = "no";
+        Response.Headers.CacheControl = "no-store";
+        return File(file.Content, file.ContentType, file.FileName);
+    }
+
+    /// <summary>从统一 Excel 工作簿导入连接、采集、规则和 B 系统适配配置。</summary>
+    [HttpPost("configuration-import")]
+    public async Task<IActionResult> ImportConfiguration(
+        [FromForm] IFormFile file,
+        [FromForm] string? operatorName)
+    {
+        if (file == null || file.Length == 0) return Error("请选择需要导入的文件", 400);
+        using var stream = file.OpenReadStream();
+        return await ExecuteAsync(
+            () => _service.ImportConfigurationAsync(file.FileName, stream, operatorName),
+            "配置导入完成");
+    }
 
     /// <summary>分页查询边缘设备及最新心跳状态。</summary>
     [HttpGet("devices")]
@@ -198,6 +240,11 @@ public class EdgeGatewayController : ControllerBase
     public async Task<IActionResult> ForwardQueue([FromBody] EdgeRetryRequestDto dto) =>
         await ExecuteAsync(() => _service.ForwardQueueAsync(dto), "转发任务已完成");
 
+    /// <summary>删除一条或多条中心消息队列数据及其上传记录。</summary>
+    [HttpPost("queue/delete")]
+    public async Task<IActionResult> DeleteQueue([FromBody] EdgeBatchIdsDto dto) =>
+        await ExecuteAsync(() => _service.DeleteQueueAsync(dto), "队列数据已删除");
+
     /// <summary>分页查询边缘网关运行事件。</summary>
     [HttpGet("events")]
     public async Task<IActionResult> GetEvents([FromQuery] EdgeEventQueryDto query) =>
@@ -219,6 +266,11 @@ public class EdgeGatewayController : ControllerBase
     [HttpPost("b-mappings")]
     public async Task<IActionResult> SaveBMapping([FromBody] EdgeBMappingSaveDto dto) =>
         await ExecuteAsync(async () => new { id = await _service.SaveBMappingRuleAsync(dto) }, "B 系统映射已保存");
+
+    /// <summary>软删除一条或多条 B 系统映射。</summary>
+    [HttpPost("b-mappings/delete")]
+    public async Task<IActionResult> DeleteBMappings([FromBody] EdgeBatchIdsDto dto) =>
+        await ExecuteAsync(() => _service.DeleteBMappingRulesAsync(dto), "B 系统映射已删除");
 
     /// <summary>查询可复用的 B 系统 payload 模板。</summary>
     [HttpGet("b-payload-templates")]
