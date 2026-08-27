@@ -31,4 +31,7 @@ public interface IAgentToolRegistryService
     /// 按工具名称查询单个工具定义。
     /// </summary>
     Task<AgentToolRegistryEntity?> GetToolAsync(string agentCode, string toolName);
+
+    /// <summary>查询指定 Agent 在前端展示的建议问题。</summary>
+    Task<List<string>> GetSuggestionsAsync(string agentCode);
 }

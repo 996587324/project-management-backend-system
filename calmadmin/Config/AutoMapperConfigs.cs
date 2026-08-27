@@ -7,6 +7,8 @@ using Model.Menu;
 using Newtonsoft.Json;
 using Model.Dto;
 using Model.EdgeGateway;
+using Model.Agent;
+using Model.Agent.ToolArguments;
 using calmadmin.Config;
 
 namespace 上传MES.Config
@@ -67,6 +69,56 @@ namespace 上传MES.Config
             CreateMap<BusinessBillCreateDto, BusinessBill>();
 
             CreateMap<BusinessBillUpdateDto, BusinessBill>();
+
+            // Agent 通用核心映射：模块配置、工具配置、会话和执行计划统一由 AutoMapper 转换。
+            CreateMap<AgentModuleSeed, AgentDefinitionEntity>(MemberList.None)
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+
+            CreateMap<AgentToolSeed, AgentToolRegistryEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+
+            CreateMap<AgentConversationEntity, AgentConversationDto>(MemberList.None);
+            CreateMap<AgentMessageEntity, AgentMessageDto>(MemberList.None)
+                .ForMember(dest => dest.Content, opt => opt.MapFrom(src => src.Content ?? string.Empty));
+            CreateMap<AgentToolRegistryEntity, AgentToolDefinitionDto>(MemberList.None)
+                .ForMember(dest => dest.Name, opt => opt.MapFrom(src => src.ToolName))
+                .ForMember(dest => dest.Description, opt => opt.MapFrom(src => src.Description ?? string.Empty))
+                .ForMember(dest => dest.Category, opt => opt.MapFrom(src => src.ServiceName))
+                .ForMember(dest => dest.Route, opt => opt.MapFrom(src => src.Route ?? string.Empty))
+                .ForMember(dest => dest.PermissionKey, opt => opt.MapFrom(src => src.PermissionKey ?? string.Empty))
+                .ForMember(dest => dest.Examples, opt => opt.MapFrom(src => src.Examples ?? string.Empty));
+            CreateMap<AgentExecutionPlanEntity, AgentToolCallDto>(MemberList.None)
+                .ForMember(dest => dest.RequestJson, opt => opt.MapFrom(src => src.ArgumentsJson))
+                .ForMember(dest => dest.ResponseJson, opt => opt.MapFrom(src => src.ResultJson ?? string.Empty))
+                .ForMember(dest => dest.Status, opt => opt.MapFrom(src =>
+                    src.Status == "PendingConfirmation" ? "PendingConfirm" :
+                    src.Status == "Succeeded" ? "Success" :
+                    src.Status == "PartiallySucceeded" ? "PartialSuccess" :
+                    src.Status == "InvalidArguments" ? "Invalid" :
+                    src.Status == "ToolNotFound" || src.Status == "Disabled" || src.Status == "ArgumentsChanged"
+                        ? "Blocked"
+                        : src.Status))
+                .ForMember(dest => dest.RequiresConfirmation, opt => opt.MapFrom(src =>
+                    src.RequiresConfirmation && src.Status == "PendingConfirmation"))
+                .ForMember(dest => dest.Confirmed, opt => opt.MapFrom(src => src.ConfirmTime.HasValue));
+
+            // 边缘 Agent 的强类型参数映射到现有 EdgeGateway 服务查询 DTO。
+            CreateMap<EdgeDeviceListArguments, EdgeDeviceQueryDto>(MemberList.None);
+            CreateMap<EdgeConnectionListArguments, EdgeDeviceQueryDto>(MemberList.None)
+                .ForMember(dest => dest.Keyword, opt => opt.MapFrom(src => src.DeviceCode))
+                .ForMember(dest => dest.OnlineStatus, opt => opt.Ignore());
+            CreateMap<EdgeQueueListArguments, EdgeQueueQueryDto>(MemberList.None);
+            CreateMap<EdgeUploadRecordListArguments, EdgeUploadRecordQueryDto>(MemberList.None);
+            CreateMap<EdgeEventListArguments, EdgeEventQueryDto>(MemberList.None);
+            CreateMap<EdgeWebSocketSourceOutputDto, EdgeAgentWebSocketSourceSummaryDto>(MemberList.None)
+                .ForMember(dest => dest.SubscriptionDeviceCount, opt => opt.MapFrom(src =>
+                    src.SubscriptionDevices.Count))
+                .ForMember(dest => dest.SubscriptionParameterCount, opt => opt.MapFrom(src =>
+                    src.SubscriptionDevices.Sum(device => device.Parameters.Count)));
+            CreateMap<EdgeBMappingOutputDto, EdgeAgentBMappingSummaryDto>(MemberList.None);
 
             // EdgeGateway 中心端映射：负责接口 DTO、SQL Server 实体以及下发给 Worker 的数据源配置转换。
             CreateMap<EdgeDeviceSaveDto, EdgeDeviceEntity>(MemberList.None)
@@ -301,6 +353,116 @@ namespace 上传MES.Config
                     src.ReceiveTime >= DateTime.Now.Subtract(EdgeRealtimeDataReception.OnlineWindow)
                         ? EdgeRealtimeDataReception.Receiving
                         : EdgeRealtimeDataReception.Interrupted));
+
+            CreateMap<EdgeRealtimeDeviceSnapshotEntity, EdgeDashboardDataSourceOptionDto>(MemberList.None)
+                .ForMember(dest => dest.TenantMark, opt => opt.MapFrom(src => src.TenantMark ?? string.Empty))
+                .ForMember(dest => dest.DeviceMark, opt => opt.MapFrom(src => src.DeviceCode))
+                .ForMember(dest => dest.DataOnline, opt => opt.MapFrom(src =>
+                    src.ReceiveTime >= DateTime.Now.Subtract(EdgeRealtimeDataReception.OnlineWindow)));
+
+            // 机械手看板映射：绑定、状态规则、统计记录和通用部件均由 AutoMapper 统一转换。
+            CreateMap<EdgeDashboardRobotBindingSaveDto, EdgeDashboardRobotBindingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.MapFrom(src => src.DashboardCode.Trim()))
+                .ForMember(dest => dest.LineCode, opt => opt.MapFrom(src => src.LineCode.Trim()))
+                .ForMember(dest => dest.RobotCode, opt => opt.MapFrom(src => src.RobotCode.Trim()))
+                .ForMember(dest => dest.RobotName, opt => opt.MapFrom(src => src.RobotName.Trim()))
+                .ForMember(dest => dest.TenantMark, opt => opt.MapFrom(src => src.TenantMark.Trim()))
+                .ForMember(dest => dest.DeviceMark, opt => opt.MapFrom(src => src.DeviceMark.Trim()))
+                .ForMember(dest => dest.RuleVersion, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardRobotBindingEntity, EdgeDashboardRobotBindingOutputDto>(MemberList.None)
+                .ForMember(dest => dest.Fields, opt => opt.Ignore())
+                .ForMember(dest => dest.StateRules, opt => opt.Ignore());
+
+            CreateMap<EdgeDashboardRobotFieldSaveDto, EdgeDashboardRobotFieldBindingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.RobotBindingId, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardRobotFieldBindingEntity, EdgeDashboardRobotFieldSaveDto>(MemberList.None);
+
+            CreateMap<EdgeDashboardRobotStateRuleSaveDto, EdgeDashboardRobotStateRuleEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.RobotBindingId, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardRobotStateRuleEntity, EdgeDashboardRobotStateRuleSaveDto>(MemberList.None);
+
+            CreateMap<EdgeDashboardModelAlarmRuleSaveDto, EdgeDashboardModelAlarmRuleEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.Ignore())
+                .ForMember(dest => dest.ModelMark, opt => opt.Ignore())
+                .ForMember(dest => dest.RuleVersion, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardModelAlarmRuleEntity, EdgeDashboardModelAlarmRuleOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardModelFieldCatalogEntity, EdgeDashboardSourceFieldOptionDto>(MemberList.None)
+                .ForMember(dest => dest.CurrentValue, opt => opt.Ignore());
+
+            CreateMap<EdgeDashboardRobotDailyStatisticEntity, EdgeDashboardDailyStatisticOutputDto>(MemberList.None)
+                .ForMember(dest => dest.AvailabilityRate, opt => opt.Ignore());
+            CreateMap<EdgeDashboardRobotFaultRecordEntity, EdgeDashboardFaultRecordOutputDto>(MemberList.None);
+
+            CreateMap<EdgeDashboardWidgetSaveDto, EdgeDashboardWidgetEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardWidgetEntity, EdgeDashboardWidgetOutputDto>(MemberList.None)
+                .ForMember(dest => dest.Fields, opt => opt.Ignore());
+            CreateMap<EdgeDashboardWidgetFieldSaveDto, EdgeDashboardWidgetFieldEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.WidgetId, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardWidgetFieldEntity, EdgeDashboardWidgetFieldSaveDto>(MemberList.None);
+
+            CreateMap<EdgeDashboardLineConfigSaveDto, EdgeDashboardLineConfigEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.MapFrom(src => src.DashboardCode.Trim()))
+                .ForMember(dest => dest.LineCode, opt => opt.MapFrom(src => src.LineCode.Trim()))
+                .ForMember(dest => dest.LineName, opt => opt.MapFrom(src => src.LineName.Trim()))
+                .ForMember(dest => dest.Area, opt => opt.MapFrom(src => src.Area.Trim()))
+                .ForMember(dest => dest.Color, opt => opt.MapFrom(src => src.Color.Trim()))
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardLineConfigEntity, EdgeDashboardLineConfigOutputDto>(MemberList.None);
+
+            CreateMap<EdgeDashboardSceneLayoutSaveDto, EdgeDashboardSceneLayoutEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.MapFrom(src => src.DashboardCode.Trim()))
+                .ForMember(dest => dest.LineCode, opt => opt.MapFrom(src => src.LineCode.Trim()))
+                .ForMember(dest => dest.LineName, opt => opt.MapFrom(src => src.LineName.Trim()))
+                .ForMember(dest => dest.Revision, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardSceneLayoutEntity, EdgeDashboardSceneLayoutOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardExportSettingSaveDto, EdgeDashboardExportSettingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.LastScheduledRunDate, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardExportSettingEntity, EdgeDashboardExportSettingOutputDto>(MemberList.None)
+                .ForMember(dest => dest.NextScheduledRunTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardExportRecordEntity, EdgeDashboardExportRecordOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardLineCodeChangeDto, EdgeDashboardSceneLayoutEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.MapFrom(src => src.DashboardCode.Trim()))
+                .ForMember(dest => dest.LineCode, opt => opt.MapFrom(src => src.NewLineCode.Trim()))
+                .ForMember(dest => dest.LineName, opt => opt.MapFrom(src => src.LineName.Trim()))
+                .ForMember(dest => dest.Revision, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
 
             CreateMap<EdgeEventReportDto, EdgeSystemEventEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())

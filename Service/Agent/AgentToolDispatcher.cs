@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using AutoMapper;
 using Interface;
 using Model.Agent;
 using Model.User;
@@ -15,8 +16,10 @@ namespace Service;
 public class AgentToolDispatcher : IAgentToolDispatcher
 {
     private readonly SqlSugarScope _dbScope;
+    private readonly IMapper _mapper;
     private readonly IAgentToolRegistryService _registry;
     private readonly IEnumerable<IAgentBusinessToolExecutor> _executors;
+    private readonly IEnumerable<IAgentToolAction> _toolActions;
     private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -28,12 +31,16 @@ public class AgentToolDispatcher : IAgentToolDispatcher
 
     public AgentToolDispatcher(
         SqlSugarScope dbScope,
+        IMapper mapper,
         IAgentToolRegistryService registry,
-        IEnumerable<IAgentBusinessToolExecutor> executors)
+        IEnumerable<IAgentBusinessToolExecutor> executors,
+        IEnumerable<IAgentToolAction> toolActions)
     {
         _dbScope = dbScope;
+        _mapper = mapper;
         _registry = registry;
         _executors = executors;
+        _toolActions = toolActions;
     }
 
     /// <summary>
@@ -97,7 +104,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
         if (plan.Status != "PendingConfirmation")
             await ExecutePlanAsync(plan, tool, request.UserId, false);
 
-        return MapToolCall(plan);
+        return _mapper.Map<AgentToolCallDto>(plan);
     }
 
     /// <summary>
@@ -112,37 +119,37 @@ public class AgentToolDispatcher : IAgentToolDispatcher
             return null;
 
         if (plan.Status is "Succeeded" or "PartiallySucceeded" or "Failed")
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
         if (!plan.RequiresConfirmation)
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
         if (plan.Status != "PendingConfirmation")
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
 
         var tool = await _registry.GetToolAsync(plan.AgentCode, plan.ToolName);
         if (tool == null || !tool.Enabled)
         {
             await RejectExistingPlanAsync(plan, tool, "Disabled", "工具未注册或已禁用，确认执行已被拦截");
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
         }
 
         var permissionError = await ValidatePermissionAsync(tool, request.UserId ?? plan.UserId);
         if (!string.IsNullOrWhiteSpace(permissionError))
         {
             await RejectExistingPlanAsync(plan, tool, "PermissionDenied", permissionError);
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
         }
 
         if (!ComputeHash(plan.ArgumentsJson).Equals(plan.ArgumentsHash, StringComparison.OrdinalIgnoreCase))
         {
             await RejectExistingPlanAsync(plan, tool, "ArgumentsChanged", "待确认参数已发生变化，请重新生成执行计划");
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
         }
 
         var schemaErrors = AgentJsonSchemaValidator.Validate(tool.InputSchema, plan.ArgumentsJson);
         if (schemaErrors.Any())
         {
             await RejectExistingPlanAsync(plan, tool, "InvalidArguments", string.Join("；", schemaErrors.Take(8)));
-            return MapToolCall(plan);
+            return _mapper.Map<AgentToolCallDto>(plan);
         }
 
         var confirmer = request.UserId ?? plan.UserId;
@@ -160,7 +167,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
         if (affected == 0)
         {
             var current = await Db.Queryable<AgentExecutionPlanEntity>().FirstAsync(x => x.Id == plan.Id);
-            return current == null ? null : MapToolCall(current);
+            return current == null ? null : _mapper.Map<AgentToolCallDto>(current);
         }
 
         plan.Status = "Running";
@@ -168,7 +175,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
         plan.ConfirmTime = DateTime.Now;
         plan.StartTime = DateTime.Now;
         await ExecutePlanAsync(plan, tool, confirmer, true);
-        return MapToolCall(plan);
+        return _mapper.Map<AgentToolCallDto>(plan);
     }
 
     /// <summary>
@@ -181,7 +188,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
             .OrderByDescending(x => x.CreateTime)
             .OrderByDescending(x => x.Id)
             .ToListAsync();
-        return plans.Select(MapToolCall).ToList();
+        return _mapper.Map<List<AgentToolCallDto>>(plans);
     }
 
     /// <summary>
@@ -203,22 +210,36 @@ public class AgentToolDispatcher : IAgentToolDispatcher
 
         try
         {
-            var executor = _executors.FirstOrDefault(x => x.CanExecute(tool.ServiceName, tool.ActionName));
-            if (executor == null)
-                throw new InvalidOperationException($"未找到 {tool.ServiceName}/{tool.ActionName} 的业务执行器");
-
             using var arguments = JsonDocument.Parse(plan.ArgumentsJson);
-            var result = await executor.ExecuteAsync(
-                tool.ActionName,
-                arguments.RootElement,
-                new AgentBusinessToolContext
-                {
-                    ConversationId = plan.ConversationId,
-                    AgentCode = plan.AgentCode,
-                    ToolName = plan.ToolName,
-                    UserId = userId,
-                    CorrelationId = plan.CorrelationId
-                });
+            var context = new AgentBusinessToolContext
+            {
+                ConversationId = plan.ConversationId,
+                AgentCode = plan.AgentCode,
+                ToolName = plan.ToolName,
+                UserId = userId,
+                CorrelationId = plan.CorrelationId
+            };
+            var action = _toolActions.FirstOrDefault(x =>
+                x.Definition.ServiceName.Equals(tool.ServiceName, StringComparison.OrdinalIgnoreCase) &&
+                x.Definition.ActionName.Equals(tool.ActionName, StringComparison.OrdinalIgnoreCase));
+            AgentBusinessToolResult result;
+            if (action != null)
+            {
+                result = await action.ExecuteAsync(
+                    arguments.RootElement,
+                    context,
+                    cancellationToken: default);
+            }
+            else
+            {
+                var executor = _executors.FirstOrDefault(x => x.CanExecute(tool.ServiceName, tool.ActionName));
+                if (executor == null)
+                    throw new InvalidOperationException($"未找到 {tool.ServiceName}/{tool.ActionName} 的业务执行器");
+                result = await executor.ExecuteAsync(
+                    tool.ActionName,
+                    arguments.RootElement,
+                    context);
+            }
 
             plan.Status = result.Success ? "Succeeded" : result.PartialSuccess ? "PartiallySucceeded" : "Failed";
             plan.ResultJson = Serialize(new
@@ -284,7 +305,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
         };
         plan.Id = await Db.Insertable(plan).ExecuteReturnIdentityAsync();
         await WriteLogAsync(tool, plan, "Dispatch", status, arguments, plan.ResultJson, message, 0);
-        return MapToolCall(plan);
+        return _mapper.Map<AgentToolCallDto>(plan);
     }
 
     /// <summary>
@@ -374,32 +395,6 @@ public class AgentToolDispatcher : IAgentToolDispatcher
             DurationMs = durationMs
         }).ExecuteCommandAsync();
     }
-
-    private static AgentToolCallDto MapToolCall(AgentExecutionPlanEntity plan) => new()
-    {
-        Id = plan.Id,
-        ConversationId = plan.ConversationId,
-        ToolId = plan.ToolId,
-        AgentCode = plan.AgentCode,
-        ToolName = plan.ToolName,
-        ToolTitle = plan.ToolTitle,
-        RequestJson = plan.ArgumentsJson,
-        ResponseJson = plan.ResultJson ?? string.Empty,
-        Status = ToClientStatus(plan.Status),
-        RequiresConfirmation = plan.RequiresConfirmation && plan.Status == "PendingConfirmation",
-        Confirmed = plan.ConfirmTime.HasValue,
-        CreateTime = plan.CreateTime
-    };
-
-    private static string ToClientStatus(string status) => status switch
-    {
-        "PendingConfirmation" => "PendingConfirm",
-        "Succeeded" => "Success",
-        "PartiallySucceeded" => "PartialSuccess",
-        "InvalidArguments" => "Invalid",
-        "ToolNotFound" or "Disabled" or "ArgumentsChanged" => "Blocked",
-        _ => status
-    };
 
     private static string NormalizeArguments(string? argumentsJson)
     {

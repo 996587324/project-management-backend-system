@@ -18,17 +18,20 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
     private readonly SqlSugarScope _dbScope;
     private readonly IMapper _mapper;
     private readonly IEdgeGatewayFeatureService _featureService;
+    private readonly IEdgeDashboardTelemetryProcessor _telemetryProcessor;
     private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
     /// <summary>通过 IOC 注入项目现有 SqlSugarScope、AutoMapper 和全局功能开关。</summary>
     public EdgeRealtimeDataService(
         SqlSugarScope dbScope,
         IMapper mapper,
-        IEdgeGatewayFeatureService featureService)
+        IEdgeGatewayFeatureService featureService,
+        IEdgeDashboardTelemetryProcessor telemetryProcessor)
     {
         _dbScope = dbScope;
         _mapper = mapper;
         _featureService = featureService;
+        _telemetryProcessor = telemetryProcessor;
     }
 
     /// <summary>
@@ -61,6 +64,7 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
         if (Encoding.UTF8.GetByteCount(snapshot.DataListJson) > MaxPayloadBytes)
             throw new InvalidOperationException("data JSON 不能超过 1 MB");
 
+        EdgeRealtimeReceiveResultDto result;
         await UpsertGate.WaitAsync(cancellationToken);
         try
         {
@@ -83,18 +87,35 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
                 snapshot.CreateTime = receiveTime;
                 snapshot.UpdateTime = receiveTime;
                 snapshot.Id = await Db.Insertable(snapshot).ExecuteReturnBigIdentityAsync();
-                return BuildResult(snapshot, inserted: true);
+                result = BuildResult(snapshot, inserted: true);
             }
-
-            snapshot.Id = existing.Id;
-            snapshot.CreateTime = existing.CreateTime;
-            await Db.Updateable(snapshot).ExecuteCommandAsync();
-            return BuildResult(snapshot, inserted: false);
+            else
+            {
+                snapshot.Id = existing.Id;
+                snapshot.CreateTime = existing.CreateTime;
+                await Db.Updateable(snapshot).ExecuteCommandAsync();
+                result = BuildResult(snapshot, inserted: false);
+            }
         }
         finally
         {
             UpsertGate.Release();
         }
+
+        // 快照保存成功后再推进看板统计；失败会返回给上报方重试，原快照仍保持幂等覆盖。
+        await _telemetryProcessor.ProcessAsync(new EdgeDashboardTelemetrySampleDto
+        {
+            DeviceMark = normalized.DeviceCode,
+            ModelMark = normalized.ModelMark,
+            DataType = normalized.DataType,
+            TenantMark = normalized.TenantMark ?? string.Empty,
+            MessageId = normalized.MessageId,
+            SourceTimestamp = normalized.SourceTimestamp,
+            Data = normalized.DataList.First().Data,
+            DataTime = dataTime,
+            ReceiveTime = receiveTime
+        }, cancellationToken);
+        return result;
     }
 
     /// <summary>分页查询快照，并通过 AutoMapper 还原动态 dataList。</summary>

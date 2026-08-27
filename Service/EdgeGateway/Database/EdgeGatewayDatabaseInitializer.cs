@@ -52,6 +52,21 @@ public sealed class EdgeGatewayDatabaseInitializer : IEdgeGatewayDatabaseInitial
                 EdgeGatewayFeatureSettingEntity>();
             _databaseMaintenanceService.PrepareRealtimeSnapshotSchema();
             _db.CodeFirst.InitTables<EdgeRealtimeDeviceSnapshotEntity>();
+            _db.CodeFirst.InitTables<EdgeDashboardRobotBindingEntity,
+                EdgeDashboardRobotFieldBindingEntity,
+                EdgeDashboardRobotStateRuleEntity,
+                EdgeDashboardModelAlarmRuleEntity,
+                EdgeDashboardRobotRuntimeStateEntity>();
+            _db.CodeFirst.InitTables<EdgeDashboardModelFieldCatalogEntity>();
+            _db.CodeFirst.InitTables<EdgeDashboardRobotDailyStatisticEntity,
+                EdgeDashboardRobotFaultRecordEntity,
+                EdgeDashboardWidgetEntity,
+                EdgeDashboardWidgetFieldEntity>();
+            _db.CodeFirst.InitTables<EdgeDashboardLineConfigEntity,
+                EdgeDashboardSceneLayoutEntity>();
+            _db.CodeFirst.InitTables<EdgeDashboardExportSettingEntity,
+                EdgeDashboardExportRecordEntity>();
+            _databaseMaintenanceService.PrepareDashboardSchema();
             _databaseMaintenanceService.EnsureLargeTableIndexes();
 
             _initialized = true;

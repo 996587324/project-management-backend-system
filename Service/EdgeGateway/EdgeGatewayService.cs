@@ -1109,6 +1109,41 @@ public class EdgeGatewayService : IEdgeGatewayService
         return _mapper.Map<List<EdgeBMappingOutputDto>>(entities);
     }
 
+    /// <summary>分页查询 B 系统映射，并支持常用路由及目标信息检索。</summary>
+    public async Task<EdgePagedResultDto<EdgeBMappingOutputDto>> GetBMappingRulePageAsync(
+        EdgeBMappingQueryDto query)
+    {
+        var page = Math.Max(query.Current, 1);
+        var size = Math.Clamp(query.Size, 1, 100);
+        var keyword = string.IsNullOrWhiteSpace(query.Keyword) ? null : query.Keyword.Trim();
+        var protocol = string.IsNullOrWhiteSpace(query.Protocol)
+            ? null
+            : query.Protocol.Trim().ToUpperInvariant();
+        RefAsync<int> total = 0;
+        var entities = await Db.Queryable<EdgeBMappingRuleEntity>()
+            .Where(x => x.IsDelete == 0)
+            .WhereIF(query.DeviceId.HasValue, x => x.DeviceId == query.DeviceId)
+            .WhereIF(protocol != null, x => x.Protocol == protocol)
+            .WhereIF(query.Enabled.HasValue, x => x.Enabled == query.Enabled)
+            .WhereIF(keyword != null, x =>
+                x.MappingName.Contains(keyword!) ||
+                (x.SourceId != null && x.SourceId.Contains(keyword!)) ||
+                (x.SourceDeviceCode != null && x.SourceDeviceCode.Contains(keyword!)) ||
+                x.TargetUrl.Contains(keyword!) ||
+                (x.MqttTopic != null && x.MqttTopic.Contains(keyword!)) ||
+                (x.MqttClientId != null && x.MqttClientId.Contains(keyword!)))
+            .OrderByDescending(x => x.UpdateTime)
+            .OrderByDescending(x => x.CreateTime)
+            .ToPageListAsync(page, size, total);
+        return new EdgePagedResultDto<EdgeBMappingOutputDto>
+        {
+            Records = _mapper.Map<List<EdgeBMappingOutputDto>>(entities),
+            Current = page,
+            Size = size,
+            Total = total
+        };
+    }
+
     /// <summary>新增或修改 B 系统协议、目标地址、字段映射和协议参数。</summary>
     public async Task<int> SaveBMappingRuleAsync(EdgeBMappingSaveDto dto)
     {

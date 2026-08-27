@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AutoMapper;
 using Interface;
 using Model.Agent;
 using Model.ProjectManage;
@@ -12,6 +13,7 @@ namespace Service;
 public class AgentService : IAgentService
 {
     private readonly SqlSugarScope _dbScope;
+    private readonly IMapper _mapper;
     private readonly IAgentModelClient _modelClient;
     private readonly IAgentToolRegistryService _registry;
     private readonly IAgentToolDispatcher _dispatcher;
@@ -27,12 +29,14 @@ public class AgentService : IAgentService
 
     public AgentService(
         SqlSugarScope dbScope,
+        IMapper mapper,
         IAgentModelClient modelClient,
         IAgentToolRegistryService registry,
         IAgentToolDispatcher dispatcher,
         IEmailService emailService)
     {
         _dbScope = dbScope;
+        _mapper = mapper;
         _modelClient = modelClient;
         _registry = registry;
         _dispatcher = dispatcher;
@@ -45,22 +49,24 @@ public class AgentService : IAgentService
     public async Task<PagedResultDto<AgentConversationDto>> GetConversationPageAsync(
         string? userId,
         int current = 1,
-        int size = 20)
+        int size = 20,
+        string? agentCode = null)
     {
-        await _registry.EnsureInitializedAsync(AgentToolRegistryService.ProjectManagementAgentCode);
         var ownerUserId = RequireUserId(userId);
+        var normalizedAgentCode = AgentToolRegistryService.NormalizeAgentCode(agentCode);
+        await _registry.EnsureInitializedAsync(normalizedAgentCode);
         var page = Math.Max(current, 1);
         var pageSize = Math.Clamp(size, 1, 100);
         RefAsync<int> total = 0;
         var list = await Db.Queryable<AgentConversationEntity>()
-            .Where(x => x.UserId == ownerUserId)
+            .Where(x => x.UserId == ownerUserId && x.AgentCode == normalizedAgentCode)
             .OrderByDescending(x => x.UpdateTime)
             .OrderByDescending(x => x.Id)
             .ToPageListAsync(page, pageSize, total);
 
         return new PagedResultDto<AgentConversationDto>
         {
-            Records = list.Select(MapConversation).ToList(),
+            Records = _mapper.Map<List<AgentConversationDto>>(list),
             Current = page,
             Size = pageSize,
             Total = total
@@ -72,7 +78,6 @@ public class AgentService : IAgentService
     /// </summary>
     public async Task<AgentConversationDetailDto?> GetConversationAsync(int id, string? userId)
     {
-        await _registry.EnsureInitializedAsync(AgentToolRegistryService.ProjectManagementAgentCode);
         var ownerUserId = RequireUserId(userId);
         var conversation = await Db.Queryable<AgentConversationEntity>()
             .FirstAsync(x => x.Id == id && x.UserId == ownerUserId);
@@ -86,8 +91,8 @@ public class AgentService : IAgentService
 
         return new AgentConversationDetailDto
         {
-            Conversation = MapConversation(conversation),
-            Messages = messages.Select(MapMessage).ToList(),
+            Conversation = _mapper.Map<AgentConversationDto>(conversation),
+            Messages = _mapper.Map<List<AgentMessageDto>>(messages),
             ToolCalls = await _dispatcher.GetConversationExecutionsAsync(id)
         };
     }
@@ -113,7 +118,7 @@ public class AgentService : IAgentService
             UpdateTime = DateTime.Now
         };
         entity.Id = await Db.Insertable(entity).ExecuteReturnIdentityAsync();
-        return MapConversation(entity);
+        return _mapper.Map<AgentConversationDto>(entity);
     }
 
     /// <summary>
@@ -128,9 +133,9 @@ public class AgentService : IAgentService
             throw new InvalidOperationException("消息不能为空");
 
         var modelUserMessage = BuildModelUserMessage(request);
-        var isProjectCsv = IsProjectCsvRequest(request);
         await ReportProgressAsync(progress, "preparing", "正在准备 Agent 会话");
         var agentCode = AgentToolRegistryService.NormalizeAgentCode(request.AgentCode);
+        var isProjectCsv = agentCode == AgentCodes.ProjectManagement && IsProjectCsvRequest(request);
         var agent = await _registry.GetAgentAsync(agentCode)
                     ?? throw new InvalidOperationException($"Agent {agentCode} 不存在或已禁用");
         var conversation = await GetOrCreateConversationAsync(request, agent.AgentCode);
@@ -155,7 +160,7 @@ public class AgentService : IAgentService
             if (!tools.Any())
                 throw new InvalidOperationException("项目新增工具未启用，无法分析 CSV 导入计划");
         }
-        var toolDefinitions = tools.Select(MapToolDefinition).ToList();
+        var toolDefinitions = _mapper.Map<List<AgentToolDefinitionDto>>(tools);
         await ReportProgressAsync(
             progress,
             "selecting_tools",
@@ -233,7 +238,7 @@ public class AgentService : IAgentService
             Plan = plan,
             ToolCalls = calls,
             RequiresConfirmation = calls.Any(x => x.RequiresConfirmation && !x.Confirmed && x.Status == "PendingConfirm"),
-            Suggestions = BuildSuggestions()
+            Suggestions = await _registry.GetSuggestionsAsync(agent.AgentCode)
         };
     }
 
@@ -266,7 +271,7 @@ public class AgentService : IAgentService
     public async Task<List<AgentToolDefinitionDto>> GetToolCatalogAsync(string? agentCode = null)
     {
         var tools = await _registry.GetAllToolsAsync(AgentToolRegistryService.NormalizeAgentCode(agentCode));
-        return tools.Select(MapToolDefinition).ToList();
+        return _mapper.Map<List<AgentToolDefinitionDto>>(tools);
     }
 
     /// <summary>
@@ -275,7 +280,6 @@ public class AgentService : IAgentService
     public async Task<AgentToolCallDto?> ConfirmToolCallAsync(AgentConfirmRequest request)
     {
         request.UserId = RequireUserId(request.UserId);
-        await _registry.EnsureInitializedAsync(AgentToolRegistryService.ProjectManagementAgentCode);
         var call = await _dispatcher.ConfirmAsync(request);
         if (call == null) return null;
         var conversation = await Db.Queryable<AgentConversationEntity>()
@@ -294,7 +298,6 @@ public class AgentService : IAgentService
     public async Task<bool> DeleteConversationAsync(AgentDeleteConversationRequest request)
     {
         var ownerUserId = RequireUserId(request.UserId);
-        await _registry.EnsureInitializedAsync(AgentToolRegistryService.ProjectManagementAgentCode);
         var conversation = await Db.Queryable<AgentConversationEntity>()
             .FirstAsync(x => x.Id == request.Id && x.UserId == ownerUserId);
         if (conversation == null) return false;
@@ -317,7 +320,6 @@ public class AgentService : IAgentService
     public async Task<AgentEmailDraftDto?> CreateEmailDraftAsync(AgentEmailDraftRequest request)
     {
         request.UserId = RequireUserId(request.UserId);
-        await _registry.EnsureInitializedAsync(AgentToolRegistryService.ProjectManagementAgentCode);
         string? content = EmptyToNull(request.Content);
         if (request.SourceToolCallId.HasValue)
         {
@@ -356,7 +358,6 @@ public class AgentService : IAgentService
     public async Task<AgentEmailSendResultDto> SendEmailAsync(AgentEmailSendRequest request)
     {
         request.UserId = RequireUserId(request.UserId);
-        await _registry.EnsureInitializedAsync(AgentToolRegistryService.ProjectManagementAgentCode);
         if (request.ConversationId.HasValue)
         {
             var conversation = await Db.Queryable<AgentConversationEntity>()
@@ -410,7 +411,7 @@ public class AgentService : IAgentService
             Reply = reply,
             ToolCalls = new List<AgentToolCallDto> { call },
             RequiresConfirmation = false,
-            Suggestions = BuildSuggestions()
+            Suggestions = await _registry.GetSuggestionsAsync(conversation.AgentCode)
         };
     }
 
@@ -427,7 +428,9 @@ public class AgentService : IAgentService
         List<AgentToolCallDto> calls)
     {
         if (!selection.Success)
-            return $"项目管理 Agent 暂时无法选择工具：{selection.ErrorMessage}";
+            return agent.AgentCode == AgentCodes.ProjectManagement
+                ? $"项目管理 Agent 暂时无法选择工具：{selection.ErrorMessage}"
+                : $"{agent.Name}暂时无法选择工具：{selection.ErrorMessage}";
 
         if (IsProjectCsvRequest(request) && !calls.Any())
         {
@@ -510,6 +513,9 @@ public class AgentService : IAgentService
 
         if (conversation != null && !SameUser(conversation.UserId, ownerUserId))
             throw new UnauthorizedAccessException("无权访问该 Agent 会话");
+        if (conversation != null &&
+            !conversation.AgentCode.Equals(agentCode, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("当前会话不属于所选 Agent，请新建会话后重试");
 
         if (conversation == null)
         {
@@ -528,7 +534,6 @@ public class AgentService : IAgentService
             return conversation;
         }
 
-        conversation.AgentCode = agentCode;
         if (!string.IsNullOrWhiteSpace(request.ScopeProjectName))
             conversation.ScopeProjectName = request.ScopeProjectName.Trim();
         if (!string.IsNullOrWhiteSpace(request.Mode))
@@ -546,7 +551,8 @@ public class AgentService : IAgentService
             .OrderByDescending(x => x.Id)
             .Take(8)
             .ToListAsync();
-        return messages.OrderBy(x => x.CreateTime).ThenBy(x => x.Id).Select(MapMessage).ToList();
+        return _mapper.Map<List<AgentMessageDto>>(
+            messages.OrderBy(x => x.CreateTime).ThenBy(x => x.Id).ToList());
     }
 
     private async Task AddMessageAsync(int conversationId, string role, string content)
@@ -618,58 +624,6 @@ public class AgentService : IAgentService
                normalized.Equals("执行", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("yes", StringComparison.OrdinalIgnoreCase);
     }
-
-    private static AgentToolDefinitionDto MapToolDefinition(AgentToolRegistryEntity tool) => new()
-    {
-        Id = tool.Id,
-        AgentCode = tool.AgentCode,
-        Name = tool.ToolName,
-        Title = tool.Title,
-        Description = tool.Description ?? string.Empty,
-        IsWriteAction = tool.IsWriteAction,
-        RequiresConfirmation = tool.RequiresConfirmation,
-        Category = tool.ServiceName,
-        Method = tool.Method,
-        Route = tool.Route ?? string.Empty,
-        ServiceName = tool.ServiceName,
-        ActionName = tool.ActionName,
-        PermissionKey = tool.PermissionKey ?? string.Empty,
-        RiskLevel = tool.RiskLevel,
-        InputSchema = tool.InputSchema,
-        OutputSchema = tool.OutputSchema,
-        Examples = tool.Examples ?? string.Empty,
-        Enabled = tool.Enabled
-    };
-
-    private static AgentConversationDto MapConversation(AgentConversationEntity entity) => new()
-    {
-        Id = entity.Id,
-        AgentCode = entity.AgentCode,
-        UserId = entity.UserId,
-        Title = entity.Title,
-        ScopeProjectName = entity.ScopeProjectName,
-        Mode = entity.Mode,
-        Status = entity.Status,
-        CreateTime = entity.CreateTime,
-        UpdateTime = entity.UpdateTime
-    };
-
-    private static AgentMessageDto MapMessage(AgentMessageEntity entity) => new()
-    {
-        Id = entity.Id,
-        ConversationId = entity.ConversationId,
-        Role = entity.Role,
-        Content = entity.Content ?? string.Empty,
-        CreateTime = entity.CreateTime
-    };
-
-    private static List<string> BuildSuggestions() => new()
-    {
-        "查看当前项目概况",
-        "查询延期任务",
-        "查看近期项目文件",
-        "新增一个项目"
-    };
 
     private static string LimitText(string value, int length) => value.Length <= length ? value : value[..length];
     private static string? EmptyToNull(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();

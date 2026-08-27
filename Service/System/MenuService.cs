@@ -31,6 +31,7 @@ namespace Service
             try
             {
                 await EnsureAgentMenuAsync();
+                await EnsureProductionDashboardMenuAsync();
                 await EnsureProjectManageMenuPermissionsAsync();
                 var allMenus = await _db.GetConnection("calmadmin").Queryable<sys_menu>()
                                        .Where(m => m.Status == true)
@@ -194,46 +195,90 @@ namespace Service
             var db = _db.GetConnection("calmadmin");
             db.CodeFirst.SetStringDefaultLength(200).InitTables(typeof(sys_menu));
 
-            var exists = await db.Queryable<sys_menu>().AnyAsync(x => x.Path == "/agent" || x.MenuName == "Agent");
+            var rootMenu = await db.Queryable<sys_menu>()
+                .FirstAsync(x => x.Path == "/agent" || x.MenuName == "Agent");
+            if (rootMenu == null)
+            {
+                var rootMenus = await db.Queryable<sys_menu>().Where(x => x.ParentId == "0").ToListAsync();
+                var maxRootId = rootMenus
+                    .Select(x => int.TryParse(x.MenuId, out var id) ? id : 0)
+                    .DefaultIfEmpty(0)
+                    .Max();
+                rootMenu = new sys_menu
+                {
+                    MenuId = (maxRootId + 1).ToString(),
+                    ParentId = "0",
+                    MenuName = "Agent",
+                    Path = "/agent",
+                    Component = "/index/index",
+                    MetaTitle = "Agent 中心",
+                    MetaIcon = "ri:robot-2-line",
+                    MetaKeepAlive = true,
+                    MetaFixedTab = false,
+                    MetaIsHide = false,
+                    MetaIsHideTab = false,
+                    MetaIsFullPage = false,
+                    MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                    MetaAuthList = "[]",
+                    Sort = 98,
+                    Status = true,
+                    CreateTime = DateTime.Now
+                };
+                await db.Insertable(rootMenu).ExecuteCommandAsync();
+            }
+
+            // 每个 Agent 使用独立子路由；已有项目助手菜单继续保留，只补齐缺失项。
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "AgentExecutor",
+                "executor",
+                "/agent/executor",
+                "项目智能助手",
+                1);
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "EdgeGatewayAgent",
+                "edge-gateway",
+                "/agent/edge-gateway",
+                "边缘计算助手",
+                2);
+        }
+
+        /// <summary>确保一个 Agent 子菜单存在，菜单编号按当前根菜单子项顺序生成。</summary>
+        private static async Task EnsureAgentChildMenuAsync(
+            ISqlSugarClient db,
+            string rootId,
+            string menuName,
+            string path,
+            string component,
+            string title,
+            int sort)
+        {
+            var exists = await db.Queryable<sys_menu>().AnyAsync(x =>
+                x.ParentId == rootId && (x.Path == path || x.MenuName == menuName));
             if (exists) return;
 
-            var rootMenus = await db.Queryable<sys_menu>().Where(x => x.ParentId == "0").ToListAsync();
-            var maxRootId = rootMenus
-                .Select(x => int.TryParse(x.MenuId, out var id) ? id : 0)
-                .DefaultIfEmpty(0)
-                .Max();
-            var rootId = (maxRootId + 1).ToString();
-            var now = DateTime.Now;
+            var children = await db.Queryable<sys_menu>()
+                .Where(x => x.ParentId == rootId)
+                .ToListAsync();
+            var suffix = 1;
+            string menuId;
+            do
+            {
+                menuId = $"{rootId}{suffix:00}";
+                suffix++;
+            } while (children.Any(x => x.MenuId == menuId));
 
             await db.Insertable(new sys_menu
             {
-                MenuId = rootId,
-                ParentId = "0",
-                MenuName = "Agent",
-                Path = "/agent",
-                Component = "/index/index",
-                MetaTitle = "Agent 中心",
-                MetaIcon = "ri:robot-2-line",
-                MetaKeepAlive = true,
-                MetaFixedTab = false,
-                MetaIsHide = false,
-                MetaIsHideTab = false,
-                MetaIsFullPage = false,
-                MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
-                MetaAuthList = "[]",
-                Sort = 98,
-                Status = true,
-                CreateTime = now
-            }).ExecuteCommandAsync();
-
-            await db.Insertable(new sys_menu
-            {
-                MenuId = $"{rootId}01",
+                MenuId = menuId,
                 ParentId = rootId,
-                MenuName = "AgentExecutor",
-                Path = "executor",
-                Component = "/agent/executor",
-                MetaTitle = "项目智能助手",
+                MenuName = menuName,
+                Path = path,
+                Component = component,
+                MetaTitle = title,
                 MetaIcon = "ri:robot-2-line",
                 MetaKeepAlive = true,
                 MetaFixedTab = false,
@@ -242,10 +287,118 @@ namespace Service
                 MetaIsFullPage = false,
                 MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
                 MetaAuthList = "[]",
-                Sort = 1,
+                Sort = sort,
                 Status = true,
-                CreateTime = now
+                CreateTime = DateTime.Now
             }).ExecuteCommandAsync();
+        }
+
+        /// <summary>
+        /// 确保后端权限模式能够返回产线看板及布局编辑器路由。
+        /// 前端使用 backend 访问模式时，只有写入 sys_menu 的路由才会被动态注册。
+        /// </summary>
+        private async Task EnsureProductionDashboardMenuAsync()
+        {
+            var db = _db.GetConnection("calmadmin");
+            db.CodeFirst.SetStringDefaultLength(200).InitTables(typeof(sys_menu));
+
+            var rootMenu = await db.Queryable<sys_menu>()
+                .Where(x => x.Path == "/production-dashboard" || x.MenuName == "ProductionDashboard")
+                .FirstAsync();
+            if (rootMenu == null)
+            {
+                var rootMenus = await db.Queryable<sys_menu>()
+                    .Where(x => x.ParentId == "0")
+                    .ToListAsync();
+                var maxRootId = rootMenus
+                    .Select(x => int.TryParse(x.MenuId, out var id) ? id : 0)
+                    .DefaultIfEmpty(0)
+                    .Max();
+                var now = DateTime.Now;
+                rootMenu = new sys_menu
+                {
+                    MenuId = (maxRootId + 1).ToString(),
+                    ParentId = "0",
+                    MenuName = "ProductionDashboard",
+                    Path = "/production-dashboard",
+                    Component = "/index/index",
+                    MetaTitle = "产线看板",
+                    MetaIcon = "ri:dashboard-3-line",
+                    MetaKeepAlive = false,
+                    MetaFixedTab = false,
+                    MetaIsHide = false,
+                    MetaIsHideTab = false,
+                    MetaIsFullPage = false,
+                    MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                    MetaAuthList = "[]",
+                    Sort = 97,
+                    Status = true,
+                    CreateTime = now
+                };
+                await db.Insertable(rootMenu).ExecuteCommandAsync();
+            }
+
+            var boardMenu = await db.Queryable<sys_menu>().FirstAsync(x =>
+                x.ParentId == rootMenu.MenuId &&
+                (x.Path == "board" || x.MenuName == "ProductionDashboardBoard"));
+            if (boardMenu == null)
+            {
+                await db.Insertable(new sys_menu
+                {
+                    MenuId = $"{rootMenu.MenuId}01",
+                    ParentId = rootMenu.MenuId,
+                    MenuName = "ProductionDashboardBoard",
+                    Path = "board",
+                    Component = "/production-dashboard/board",
+                    MetaTitle = "生产监控",
+                    MetaIcon = "ri:dashboard-3-line",
+                    MetaKeepAlive = false,
+                    MetaFixedTab = false,
+                    MetaIsHide = false,
+                    MetaIsHideTab = false,
+                    MetaIsFullPage = false,
+                    MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                    MetaAuthList = "[]",
+                    Sort = 1,
+                    Status = true,
+                    CreateTime = DateTime.Now
+                }).ExecuteCommandAsync();
+            }
+            else if (boardMenu.MetaIsFullPage == true)
+            {
+                // 旧版本曾将看板配置为全屏路由；改为普通页面后，由看板内部按钮控制全屏状态。
+                boardMenu.MetaIsFullPage = false;
+                await db.Updateable(boardMenu)
+                    .UpdateColumns(x => x.MetaIsFullPage)
+                    .ExecuteCommandAsync();
+            }
+
+            var editorExists = await db.Queryable<sys_menu>().AnyAsync(x =>
+                x.ParentId == rootMenu.MenuId &&
+                (x.Path == "layout-editor" || x.MenuName == "ProductionDashboardLayoutEditor"));
+            if (!editorExists)
+            {
+                await db.Insertable(new sys_menu
+                {
+                    MenuId = $"{rootMenu.MenuId}02",
+                    ParentId = rootMenu.MenuId,
+                    MenuName = "ProductionDashboardLayoutEditor",
+                    Path = "layout-editor",
+                    Component = "/production-dashboard/layout-editor",
+                    MetaTitle = "布局编辑",
+                    MetaIcon = "ri:layout-grid-line",
+                    MetaKeepAlive = false,
+                    MetaFixedTab = false,
+                    MetaIsHide = true,
+                    MetaIsHideTab = false,
+                    MetaIsFullPage = true,
+                    MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                    MetaAuthList = "[]",
+                    Sort = 2,
+                    Status = true,
+                    CreateTime = DateTime.Now
+                }).ExecuteCommandAsync();
+            }
         }
 
         /// <summary>

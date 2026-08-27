@@ -68,6 +68,9 @@ public interface IEdgeGatewayService
     Task<long> ReportEventAsync(EdgeEventReportDto dto);
     /// <summary>查询 B 系统字段映射及目标地址配置。</summary>
     Task<List<EdgeBMappingOutputDto>> GetBMappingRulesAsync();
+    /// <summary>按关键字、设备、协议和启停状态分页查询 B 系统映射。</summary>
+    Task<EdgePagedResultDto<EdgeBMappingOutputDto>> GetBMappingRulePageAsync(
+        EdgeBMappingQueryDto query);
     /// <summary>新增或修改 B 系统映射配置。</summary>
     Task<int> SaveBMappingRuleAsync(EdgeBMappingSaveDto dto);
     Task<int> DeleteBMappingRulesAsync(EdgeBatchIdsDto dto);

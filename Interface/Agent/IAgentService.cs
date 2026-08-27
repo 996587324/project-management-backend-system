@@ -11,7 +11,11 @@ public interface IAgentService
     /// <summary>
     /// 分页查询 Agent 会话。
     /// </summary>
-    Task<PagedResultDto<AgentConversationDto>> GetConversationPageAsync(string? userId, int current = 1, int size = 20);
+    Task<PagedResultDto<AgentConversationDto>> GetConversationPageAsync(
+        string? userId,
+        int current = 1,
+        int size = 20,
+        string? agentCode = null);
 
     /// <summary>
     /// 查询单个会话详情，包括消息和工具调用记录。

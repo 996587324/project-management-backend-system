@@ -262,6 +262,11 @@ public class EdgeGatewayController : ControllerBase
     [HttpGet("b-mappings")]
     public async Task<IActionResult> GetBMappings() => Success(await _service.GetBMappingRulesAsync());
 
+    /// <summary>按关键字、设备、协议和启停状态分页查询 B 系统映射。</summary>
+    [HttpGet("b-mappings/page")]
+    public async Task<IActionResult> GetBMappingPage([FromQuery] EdgeBMappingQueryDto query) =>
+        Success(await _service.GetBMappingRulePageAsync(query));
+
     /// <summary>新增或修改 B 系统映射配置。</summary>
     [HttpPost("b-mappings")]
     public async Task<IActionResult> SaveBMapping([FromBody] EdgeBMappingSaveDto dto) =>

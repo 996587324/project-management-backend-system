@@ -19,11 +19,15 @@ public class AgentController : ControllerBase
     }
 
     [HttpGet("conversations")]
-    public async Task<IActionResult> GetConversations([FromQuery] string? userId, [FromQuery] int current = 1, [FromQuery] int size = 20)
+    public async Task<IActionResult> GetConversations(
+        [FromQuery] string? userId,
+        [FromQuery] int current = 1,
+        [FromQuery] int size = 20,
+        [FromQuery] string? agentCode = null)
     {
         var currentUserId = GetCurrentUserId();
         if (string.IsNullOrWhiteSpace(currentUserId)) return Error("未登录", 401);
-        return Success(await _service.GetConversationPageAsync(currentUserId, current, size));
+        return Success(await _service.GetConversationPageAsync(currentUserId, current, size, agentCode));
     }
 
     [HttpGet("conversations/{id:int}")]

@@ -316,6 +316,15 @@ public class EdgeEventQueryDto : EdgePageQueryDto
     public string? EventType { get; set; }
 }
 
+/// <summary>B 系统映射分页筛选条件。</summary>
+public class EdgeBMappingQueryDto : EdgePageQueryDto
+{
+    public string? Keyword { get; set; }
+    public int? DeviceId { get; set; }
+    public string? Protocol { get; set; }
+    public bool? Enabled { get; set; }
+}
+
 /// <summary>边缘节点上报运行事件的请求模型。</summary>
 public class EdgeEventReportDto
 {

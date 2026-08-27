@@ -159,6 +159,10 @@ namespace 上传MES.Config
             builder.Services.AddHostedService<EdgeBAutoForwardHostedService>();
             // 日志中心仅保留最近七天的运行事件，启动时清理一次，之后每天清理一次。
             builder.Services.AddHostedService<EdgeGatewayLogCleanupHostedService>();
+            // 每十秒推进无新样本机械手的离线时间，统计服务不依赖看板页面是否打开。
+            builder.Services.AddHostedService<EdgeDashboardStatisticsHostedService>();
+            // 每日按数据库配置的时间为每条启用线体生成独立看板日报。
+            builder.Services.AddHostedService<EdgeDashboardExportHostedService>();
             #region JWT校验
             //增加鉴权逻辑
             JWTTokenOptions tokenOptions = new JWTTokenOptions();
