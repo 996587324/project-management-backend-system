@@ -4,7 +4,7 @@ using Model.EdgeGateway;
 namespace Service;
 
 /// <summary>
-/// B 系统映射选路实现，通过订阅子设备名称关联目标连接，并兼容节点和全局默认映射。
+/// B 系统映射选路实现，优先匹配订阅设备精确路由，并兼容历史名称跳转、节点及全局默认映射。
 /// </summary>
 public sealed class EdgeBMappingResolver : IEdgeBMappingResolver
 {
@@ -27,6 +27,14 @@ public sealed class EdgeBMappingResolver : IEdgeBMappingResolver
             !string.IsNullOrWhiteSpace(sourceId) &&
             !string.IsNullOrWhiteSpace(sourceDeviceCode))
         {
+            // 管理端精确映射的配置维度就是“节点 + 数据源 + 订阅设备”，
+            // 必须优先按这三个字段直接命中，不能依赖订阅设备名称再跳转到其他数据源。
+            var exactMapping = enabledMappings.Find(x =>
+                x.DeviceId == deviceId &&
+                TextEquals(x.SourceId, sourceId) &&
+                TextEquals(x.SourceDeviceCode, sourceDeviceCode));
+            if (exactMapping != null) return exactMapping;
+
             var originSource = sources
                 .Where(x => x.IsDelete == 0 &&
                             x.DeviceId == deviceId.Value &&

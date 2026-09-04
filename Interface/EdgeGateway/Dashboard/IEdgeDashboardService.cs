@@ -39,6 +39,15 @@ public interface IEdgeDashboardService
     /// <summary>保存机械手数据源、展示字段和运行状态规则。</summary>
     Task<EdgeDashboardRobotBindingOutputDto> SaveBindingAsync(EdgeDashboardRobotBindingSaveDto dto);
 
+    /// <summary>查询一条线体的 Three.js 设备数据绑定。</summary>
+    Task<List<EdgeDashboardDeviceBindingOutputDto>> GetDeviceBindingsAsync(string lineCode);
+
+    /// <summary>保存 Three.js 设备的数据源和展示字段绑定。</summary>
+    Task<EdgeDashboardDeviceBindingOutputDto> SaveDeviceBindingAsync(EdgeDashboardDeviceBindingSaveDto dto);
+
+    /// <summary>软删除 Three.js 设备绑定。</summary>
+    Task DeleteDeviceBindingAsync(long id);
+
     /// <summary>软删除机械手绑定，并结束尚未关闭的运行状态和故障。</summary>
     Task DeleteBindingAsync(long id);
 
@@ -70,8 +79,13 @@ public interface IEdgeDashboardService
     /// <summary>返回不同数据源允许绑定到部件的字段目录。</summary>
     List<EdgeDashboardFieldCatalogDto> GetWidgetFieldCatalog();
 
-    /// <summary>一次返回看板首屏所需的线体列表和全部 Three.js 场景。</summary>
-    Task<EdgeDashboardBootstrapOutputDto> GetBootstrapAsync(string dashboardCode);
+    /// <summary>
+    /// 一次返回看板首屏所需的线体列表和全部 Three.js 场景。
+    /// 仅管理端允许在读取过程中迁移旧版场景数据；公开只读页必须关闭该行为。
+    /// </summary>
+    Task<EdgeDashboardBootstrapOutputDto> GetBootstrapAsync(
+        string dashboardCode,
+        bool migrateLegacyScenes = true);
 
     /// <summary>新增或修改一条看板线体主配置。</summary>
     Task<EdgeDashboardLineConfigOutputDto> SaveLineConfigAsync(

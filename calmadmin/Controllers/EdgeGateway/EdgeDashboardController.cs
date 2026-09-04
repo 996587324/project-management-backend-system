@@ -71,6 +71,25 @@ public sealed class EdgeDashboardController : ControllerBase
     public async Task<IActionResult> SaveBinding([FromBody] EdgeDashboardRobotBindingSaveDto dto) =>
         await ExecuteAsync(() => _service.SaveBindingAsync(dto), "机械手绑定已保存");
 
+    /// <summary>查询一条线体内 Three.js 设备的数据源绑定和展示字段。</summary>
+    [HttpGet("device-bindings")]
+    public async Task<IActionResult> GetDeviceBindings([FromQuery] string lineCode) =>
+        await ExecuteAsync(() => _service.GetDeviceBindingsAsync(lineCode));
+
+    /// <summary>新增或修改 Three.js 设备的数据源和展示字段绑定。</summary>
+    [HttpPost("device-bindings")]
+    public async Task<IActionResult> SaveDeviceBinding([FromBody] EdgeDashboardDeviceBindingSaveDto dto) =>
+        await ExecuteAsync(() => _service.SaveDeviceBindingAsync(dto), "设备绑定已保存");
+
+    /// <summary>软删除 Three.js 设备绑定。</summary>
+    [HttpDelete("device-bindings/{id:long}")]
+    public async Task<IActionResult> DeleteDeviceBinding(long id) =>
+        await ExecuteAsync(async () =>
+        {
+            await _service.DeleteDeviceBindingAsync(id);
+            return new { id };
+        }, "设备绑定已删除");
+
     /// <summary>软删除机械手绑定并关闭仍处于活动状态的故障。</summary>
     [HttpDelete("bindings/{id:long}")]
     public async Task<IActionResult> DeleteBinding(long id) =>

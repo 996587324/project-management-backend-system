@@ -3,7 +3,7 @@ using Interface;
 namespace calmadmin.HostedServices;
 
 /// <summary>
-/// 在 ASP.NET Core 开始处理请求前初始化一次 EdgeGateway 中心数据库结构。
+/// 在 ASP.NET Core 开始处理请求前初始化一次 EdgeGateway 中心库及独立日志库结构。
 /// </summary>
 public sealed class EdgeGatewayDatabaseInitializationHostedService : IHostedService
 {
@@ -16,7 +16,7 @@ public sealed class EdgeGatewayDatabaseInitializationHostedService : IHostedServ
         _databaseInitializer = databaseInitializer;
     }
 
-    /// <summary>应用启动阶段创建 EdgeGateway 表和索引，初始化失败时阻止服务带病启动。</summary>
+    /// <summary>应用启动阶段创建 EdgeGateway 表、日志数据库和索引，初始化失败时阻止服务带病启动。</summary>
     public Task StartAsync(CancellationToken cancellationToken) =>
         _databaseInitializer.InitializeAsync(cancellationToken);
 

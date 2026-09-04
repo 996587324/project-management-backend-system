@@ -4,6 +4,7 @@ using Kdbndp.TypeMapping;
 using Model.Common;
 using Model.Dto;
 using Model.Menu;
+using Model.User;
 using SqlSugar;
 using System;
 using System.Collections.Generic;
@@ -31,6 +32,7 @@ namespace Service
             try
             {
                 await EnsureAgentMenuAsync();
+                await EnsurePdaMenuAsync();
                 await EnsureProductionDashboardMenuAsync();
                 await EnsureProjectManageMenuPermissionsAsync();
                 var allMenus = await _db.GetConnection("calmadmin").Queryable<sys_menu>()
@@ -227,7 +229,15 @@ namespace Service
                 await db.Insertable(rootMenu).ExecuteCommandAsync();
             }
 
-            // 每个 Agent 使用独立子路由；已有项目助手菜单继续保留，只补齐缺失项。
+            // Agent 统一从智能助手入口进入；旧路由仅为已打开页面兼容而保留并隐藏。
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "AgentAssistant",
+                "assistant",
+                "/agent/assistant",
+                "智能助手",
+                1);
             await EnsureAgentChildMenuAsync(
                 db,
                 rootMenu.MenuId,
@@ -235,7 +245,8 @@ namespace Service
                 "executor",
                 "/agent/executor",
                 "项目智能助手",
-                1);
+                2,
+                isHide: true);
             await EnsureAgentChildMenuAsync(
                 db,
                 rootMenu.MenuId,
@@ -243,7 +254,91 @@ namespace Service
                 "edge-gateway",
                 "/agent/edge-gateway",
                 "边缘计算助手",
+                3,
+                isHide: true);
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "ProductionDashboardAgent",
+                "production-dashboard",
+                "/agent/production-dashboard",
+                "生产看板助手",
+                4,
+                isHide: true);
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "AgentModelProvider",
+                "model-providers",
+                "/agent/model-provider",
+                "模型平台配置",
+                5,
+                "R_SUPER,R_ADMIN");
+        }
+
+        private async Task EnsurePdaMenuAsync()
+        {
+            var db = _db.GetConnection("calmadmin");
+            db.CodeFirst.SetStringDefaultLength(200).InitTables(typeof(sys_menu), typeof(SysRole));
+
+            var rootMenu = await db.Queryable<sys_menu>()
+                .FirstAsync(x => x.Path == "/pda" || x.MenuName == "Pda");
+            if (rootMenu == null)
+            {
+                var rootMenus = await db.Queryable<sys_menu>().Where(x => x.ParentId == "0").ToListAsync();
+                var maxRootId = rootMenus
+                    .Select(x => int.TryParse(x.MenuId, out var id) ? id : 0)
+                    .DefaultIfEmpty(0)
+                    .Max();
+                rootMenu = new sys_menu
+                {
+                    MenuId = (maxRootId + 1).ToString(),
+                    ParentId = "0",
+                    MenuName = "Pda",
+                    Path = "/pda",
+                    Component = "/index/index",
+                    MetaTitle = "PDA 管理",
+                    MetaIcon = "ri:barcode-box-line",
+                    MetaKeepAlive = true,
+                    MetaFixedTab = false,
+                    MetaIsHide = false,
+                    MetaIsHideTab = false,
+                    MetaIsFullPage = false,
+                    MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                    MetaAuthList = "[]",
+                    Sort = 96,
+                    Status = true,
+                    CreateTime = DateTime.Now
+                };
+                await db.Insertable(rootMenu).ExecuteCommandAsync();
+            }
+
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "PdaScanLog",
+                "scan-logs",
+                "/pda/scan-log",
+                "扫码记录",
+                1);
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "PdaDevice",
+                "devices",
+                "/pda/device",
+                "PDA 设备",
                 2);
+            await EnsureAgentChildMenuAsync(
+                db,
+                rootMenu.MenuId,
+                "PdaBarcodeRule",
+                "barcode-rules",
+                "/pda/barcode-rule",
+                "条码规则",
+                3);
+
+            await EnsureEngineerPdaPermissionAsync(db);
         }
 
         /// <summary>确保一个 Agent 子菜单存在，菜单编号按当前根菜单子项顺序生成。</summary>
@@ -254,11 +349,24 @@ namespace Service
             string path,
             string component,
             string title,
-            int sort)
+            int sort,
+            string roles = "R_SUPER,R_ADMIN,R_ENGINEER",
+            bool isHide = false)
         {
-            var exists = await db.Queryable<sys_menu>().AnyAsync(x =>
+            var exists = await db.Queryable<sys_menu>().FirstAsync(x =>
                 x.ParentId == rootId && (x.Path == path || x.MenuName == menuName));
-            if (exists) return;
+            if (exists != null)
+            {
+                if (!string.Equals(exists.MetaRoles, roles, StringComparison.Ordinal) ||
+                    exists.MetaIsHide != isHide || exists.Sort != sort)
+                {
+                    exists.MetaRoles = roles;
+                    exists.MetaIsHide = isHide;
+                    exists.Sort = sort;
+                    await db.Updateable(exists).ExecuteCommandAsync();
+                }
+                return;
+            }
 
             var children = await db.Queryable<sys_menu>()
                 .Where(x => x.ParentId == rootId)
@@ -282,15 +390,52 @@ namespace Service
                 MetaIcon = "ri:robot-2-line",
                 MetaKeepAlive = true,
                 MetaFixedTab = false,
-                MetaIsHide = false,
+                MetaIsHide = isHide,
                 MetaIsHideTab = false,
                 MetaIsFullPage = false,
-                MetaRoles = "R_SUPER,R_ADMIN,R_ENGINEER",
+                MetaRoles = roles,
                 MetaAuthList = "[]",
                 Sort = sort,
                 Status = true,
                 CreateTime = DateTime.Now
             }).ExecuteCommandAsync();
+        }
+
+        /// <summary>让既有工程师默认能进入自己的模型配置页，不影响其余自定义权限。</summary>
+        private static async Task EnsureEngineerModelProviderPermissionAsync(ISqlSugarClient db)
+        {
+            var role = await db.Queryable<SysRole>()
+                .FirstAsync(x => x.roleCode == "R_ENGINEER" && x.enabled);
+            if (role == null || role.permissionKeyList.Contains("*")) return;
+
+            var keys = role.permissionKeyList
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Append("AgentModelProvider")
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (keys.Count == role.permissionKeyList.Count) return;
+
+            role.permissionKeys = string.Join(",", keys);
+            role.updateTime = DateTime.Now;
+            await db.Updateable(role).ExecuteCommandAsync();
+        }
+
+        private static async Task EnsureEngineerPdaPermissionAsync(ISqlSugarClient db)
+        {
+            var role = await db.Queryable<SysRole>()
+                .FirstAsync(x => x.roleCode == "R_ENGINEER" && x.enabled);
+            if (role == null || role.permissionKeyList.Contains("*")) return;
+
+            var keys = role.permissionKeyList
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Concat(new[] { "Pda", "PdaScan", "PdaScanLog", "PdaDevice", "PdaBarcodeRule" })
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (keys.Count == role.permissionKeyList.Count) return;
+
+            role.permissionKeys = string.Join(",", keys);
+            role.updateTime = DateTime.Now;
+            await db.Updateable(role).ExecuteCommandAsync();
         }
 
         /// <summary>

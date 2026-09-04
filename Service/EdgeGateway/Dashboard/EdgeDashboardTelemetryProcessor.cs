@@ -1,5 +1,6 @@
 using System.Globalization;
 using Interface;
+using Microsoft.Extensions.Logging;
 using Model.EdgeGateway;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -17,12 +18,16 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
     private const string ModelRuleScope = "Model";
     private const string UnclassifiedModelMark = "__UNCLASSIFIED__";
     private readonly SqlSugarScope _dbScope;
+    private readonly ILogger<EdgeDashboardTelemetryProcessor> _logger;
     private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
-    /// <summary>复用项目现有 SqlSugarScope，避免创建额外数据库连接。</summary>
-    public EdgeDashboardTelemetryProcessor(SqlSugarScope dbScope)
+    /// <summary>通过 IOC 获取项目现有 SqlSugarScope 和日志组件。</summary>
+    public EdgeDashboardTelemetryProcessor(
+        SqlSugarScope dbScope,
+        ILogger<EdgeDashboardTelemetryProcessor> logger)
     {
         _dbScope = dbScope;
+        _logger = logger;
     }
 
     /// <summary>处理一条新样本；一份 HTTP 数据源可以同时驱动多个已绑定机械手。</summary>
@@ -83,14 +88,15 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         await ProcessingGate.WaitAsync(cancellationToken);
         try
         {
-            var bindings = await Db.Queryable<EdgeDashboardRobotBindingEntity>()
+            using var db = _dbScope.GetConnection("calmadmin").CopyNew();
+            var bindings = await db.Queryable<EdgeDashboardRobotBindingEntity>()
                 .Where(x => x.IsDelete == 0 && x.Enabled)
                 .ToListAsync();
             if (bindings.Count == 0) return;
 
             var bindingMap = bindings.ToDictionary(x => x.Id);
             var bindingIds = bindingMap.Keys.ToList();
-            var runtimeStates = await Db.Queryable<EdgeDashboardRobotRuntimeStateEntity>()
+            var runtimeStates = await db.Queryable<EdgeDashboardRobotRuntimeStateEntity>()
                 .Where(x => bindingIds.Contains(x.RobotBindingId))
                 .ToListAsync();
             foreach (var runtime in runtimeStates)
@@ -107,7 +113,8 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
                         binding,
                         EdgeDashboardConstants.Offline,
                         runtime.LastAccountedTime,
-                        now);
+                        now,
+                        db);
                 }
                 else
                 {
@@ -116,15 +123,17 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
                         binding,
                         runtime.CurrentState,
                         runtime.LastAccountedTime,
-                        stateEnd);
+                        stateEnd,
+                        db);
                     if (now > offlineStart)
                     {
                         await AddDurationAsync(
                             binding,
                             EdgeDashboardConstants.Offline,
                             Max(runtime.LastAccountedTime, offlineStart),
-                            now);
-                        await CloseActiveFaultsAsync(binding.Id, offlineStart, null);
+                            now,
+                            db);
+                        await CloseActiveFaultsAsync(binding.Id, offlineStart, null, db);
                         runtime.CurrentState = EdgeDashboardConstants.Offline;
                         runtime.StateStartTime = offlineStart;
                     }
@@ -132,7 +141,7 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
 
                 runtime.LastAccountedTime = now;
                 runtime.UpdateTime = now;
-                await Db.Updateable(runtime).ExecuteCommandAsync();
+                await db.Updateable(runtime).ExecuteCommandAsync();
             }
         }
         finally
@@ -414,9 +423,11 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         EdgeDashboardRobotBindingEntity binding,
         string state,
         DateTime start,
-        DateTime end)
+        DateTime end,
+        ISqlSugarClient? db = null)
     {
         if (end <= start) return;
+        db ??= Db;
         var cursor = start;
         while (cursor < end)
         {
@@ -428,12 +439,12 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
                 (long)Math.Round((segmentEnd - cursor).TotalSeconds, MidpointRounding.AwayFromZero));
             if (seconds > 0)
             {
-                var daily = await GetOrCreateDailyAsync(binding, statDate);
+                var daily = await GetOrCreateDailyAsync(binding, statDate, db);
                 AddSeconds(daily, state, seconds);
                 daily.LastState = state;
                 daily.RuleVersion = binding.RuleVersion;
                 daily.UpdateTime = DateTime.Now;
-                await SaveDailyAsync(daily);
+                await SaveDailyAsync(daily, db);
             }
             cursor = segmentEnd;
         }
@@ -471,43 +482,93 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
     /// <summary>读取业务日统计；不存在时构造待新增记录。</summary>
     private async Task<EdgeDashboardRobotDailyStatisticEntity> GetOrCreateDailyAsync(
         EdgeDashboardRobotBindingEntity binding,
-        DateTime statDate)
+        DateTime statDate,
+        ISqlSugarClient? db = null)
     {
-        var daily = await Db.Queryable<EdgeDashboardRobotDailyStatisticEntity>()
-            .FirstAsync(x => x.RobotBindingId == binding.Id && x.StatDate == statDate);
-        return daily ?? new EdgeDashboardRobotDailyStatisticEntity
+        db ??= Db;
+        try
         {
-            RobotBindingId = binding.Id,
-            StatDate = statDate,
-            LineCode = binding.LineCode,
-            RobotCode = binding.RobotCode,
-            RobotName = binding.RobotName,
-            RuleVersion = binding.RuleVersion,
-            CreateTime = DateTime.Now,
-            UpdateTime = DateTime.Now
-        };
+            var daily = await db.Queryable<EdgeDashboardRobotDailyStatisticEntity>()
+                .FirstAsync(x => x.RobotBindingId == binding.Id && x.StatDate == statDate);
+            return daily ?? new EdgeDashboardRobotDailyStatisticEntity
+            {
+                RobotBindingId = binding.Id,
+                StatDate = statDate,
+                LineCode = binding.LineCode,
+                RobotCode = binding.RobotCode,
+                RobotName = binding.RobotName,
+                RuleVersion = binding.RuleVersion,
+                CreateTime = DateTime.Now,
+                UpdateTime = DateTime.Now
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "读取或创建机械手每日统计失败。BindingId: {BindingId}, LineCode: {LineCode}, RobotCode: {RobotCode}, StatDate: {StatDate:yyyy-MM-dd}",
+                binding.Id,
+                binding.LineCode,
+                binding.RobotCode,
+                statDate);
+            throw;
+        }
     }
 
     /// <summary>根据主键决定新增或更新每日统计。</summary>
-    private async Task SaveDailyAsync(EdgeDashboardRobotDailyStatisticEntity daily)
+    private async Task SaveDailyAsync(
+        EdgeDashboardRobotDailyStatisticEntity daily,
+        ISqlSugarClient? db = null)
     {
-        if (daily.Id == 0)
-            daily.Id = await Db.Insertable(daily).ExecuteReturnBigIdentityAsync();
-        else
-            await Db.Updateable(daily).ExecuteCommandAsync();
+        db ??= Db;
+        var operation = daily.Id == 0 ? "Insert" : "Update";
+        try
+        {
+            if (daily.Id == 0)
+                daily.Id = await db.Insertable(daily).ExecuteReturnBigIdentityAsync();
+            else
+                await db.Updateable(daily).ExecuteCommandAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "保存机械手每日统计失败。Operation: {Operation}, Id: {Id}, BindingId: {BindingId}, LineCode: {LineCode}, RobotCode: {RobotCode}, StatDate: {StatDate:yyyy-MM-dd}, LastState: {LastState}, RunningSeconds: {RunningSeconds}, IdleSeconds: {IdleSeconds}, FaultSeconds: {FaultSeconds}, StoppedSeconds: {StoppedSeconds}, OfflineSeconds: {OfflineSeconds}, UnknownSeconds: {UnknownSeconds}, FaultCount: {FaultCount}, SampleCount: {SampleCount}",
+                operation,
+                daily.Id,
+                daily.RobotBindingId,
+                daily.LineCode,
+                daily.RobotCode,
+                daily.StatDate,
+                daily.LastState,
+                daily.RunningSeconds,
+                daily.IdleSeconds,
+                daily.FaultSeconds,
+                daily.StoppedSeconds,
+                daily.OfflineSeconds,
+                daily.UnknownSeconds,
+                daily.FaultCount,
+                daily.SampleCount);
+            throw;
+        }
     }
 
     /// <summary>关闭指定绑定的全部活动故障，供通信超时扫描调用。</summary>
-    private async Task CloseActiveFaultsAsync(long bindingId, DateTime endTime, string? messageId)
+    private async Task CloseActiveFaultsAsync(
+        long bindingId,
+        DateTime endTime,
+        string? messageId,
+        ISqlSugarClient? db = null)
     {
-        var activeFaults = await Db.Queryable<EdgeDashboardRobotFaultRecordEntity>()
+        db ??= Db;
+        var activeFaults = await db.Queryable<EdgeDashboardRobotFaultRecordEntity>()
             .Where(x => x.RobotBindingId == bindingId && x.EndTime == null)
             .ToListAsync();
         var now = DateTime.Now;
         foreach (var fault in activeFaults)
             CloseFault(fault, endTime, messageId, now);
         if (activeFaults.Count > 0)
-            await Db.Updateable(activeFaults).ExecuteCommandAsync();
+            await db.Updateable(activeFaults).ExecuteCommandAsync();
     }
 
     /// <summary>为一条活动故障补齐恢复时间和最终持续秒数。</summary>

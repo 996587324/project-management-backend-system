@@ -3,6 +3,7 @@ namespace Model.Agent;
 public class AgentToolSelectionRequest
 {
     public string AgentCode { get; set; } = string.Empty;
+    public string UserId { get; set; } = string.Empty;
     public string SystemPrompt { get; set; } = string.Empty;
     public string UserMessage { get; set; } = string.Empty;
     public string? ScopeProjectName { get; set; }

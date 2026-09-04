@@ -8,7 +8,8 @@ namespace Interface;
 public interface IEdgeBMappingResolver
 {
     /// <summary>
-    /// 先通过订阅子设备名称解析目标连接，再按“子设备映射、节点默认、全局默认”选择映射。
+    /// 先按“节点 + 数据源 + 订阅设备”精确匹配；未命中时兼容历史名称跳转，
+    /// 最后回退到节点默认或全局默认映射。
     /// </summary>
     EdgeBMappingRuleEntity? Resolve(
         IReadOnlyCollection<EdgeBMappingRuleEntity> mappings,

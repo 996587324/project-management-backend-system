@@ -52,6 +52,14 @@ public interface IEdgeGatewayService
     Task<EdgePagedResultDto<EdgeMessageQueueEntity>> GetQueuePageAsync(EdgeQueueQueryDto query);
     /// <summary>分页查询中心端到 B 系统的每次上传结果。</summary>
     Task<EdgePagedResultDto<EdgeUploadRecordEntity>> GetUploadRecordPageAsync(EdgeUploadRecordQueryDto query);
+    /// <summary>分页查询边缘节点向上游 WebSocket 发送报文的结果。</summary>
+    Task<EdgePagedResultDto<EdgeWebSocketSendRecordEntity>> GetWebSocketSendRecordPageAsync(
+        EdgeWebSocketSendRecordQueryDto query);
+    /// <summary>接收边缘节点上报的 WebSocket 报文发送结果。</summary>
+    Task<long> ReportWebSocketSendRecordAsync(EdgeWebSocketSendRecordReportDto dto);
+    /// <summary>分页查询最近七天 WebSocket 接收数据日表。</summary>
+    Task<EdgePagedResultDto<EdgeWebSocketReceiveRecordEntity>> GetWebSocketReceiveRecordPageAsync(
+        EdgeWebSocketReceiveRecordQueryDto query);
     /// <summary>接收边缘节点上传的标准消息并写入中心队列。</summary>
     Task<EdgeMessageAcceptResultDto> ReceiveMessagesAsync(EdgeMessageBatchDto dto);
     /// <summary>将失败队列重置为待处理状态。</summary>

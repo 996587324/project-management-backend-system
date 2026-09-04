@@ -43,6 +43,9 @@ public sealed class AgentToolSeed
 /// <summary>系统内置 Agent 编码，避免前后端业务代码散落魔法字符串。</summary>
 public static class AgentCodes
 {
+    public const string Chat = "chat";
+    public const string QueryAssistant = "query-assistant";
     public const string ProjectManagement = "project-management";
     public const string EdgeGateway = "edge-gateway";
+    public const string ProductionDashboard = "production-dashboard";
 }

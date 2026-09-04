@@ -16,4 +16,12 @@ public interface IAgentModelClient
     /// 根据用户消息、历史记录和工具结果生成最终回复。
     /// </summary>
     Task<AgentModelReply> GenerateReplyAsync(AgentModelRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 使用已保存的平台配置发送最小请求，验证密钥、地址和模型是否可用。
+    /// </summary>
+    Task<AgentModelProviderTestResultDto> TestConnectionAsync(
+        int providerId,
+        string ownerUserId,
+        CancellationToken cancellationToken = default);
 }

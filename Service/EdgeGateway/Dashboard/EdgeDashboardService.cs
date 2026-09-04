@@ -375,6 +375,86 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         return saved;
     }
 
+    /// <summary>查询一条线体中 Three.js 设备的数据源绑定。</summary>
+    public async Task<List<EdgeDashboardDeviceBindingOutputDto>> GetDeviceBindingsAsync(string lineCode)
+    {
+        lineCode = Require(lineCode, "lineCode");
+        var bindings = await Db.Queryable<EdgeDashboardDeviceBindingEntity>()
+            .Where(x => x.LineCode == lineCode && x.IsDelete == 0)
+            .OrderBy(x => x.DeviceCode)
+            .ToListAsync();
+        return await BuildDeviceBindingOutputsAsync(bindings);
+    }
+
+    /// <summary>保存设备实时数据源与展示字段；设备不复用机械手统计和故障状态机。</summary>
+    public async Task<EdgeDashboardDeviceBindingOutputDto> SaveDeviceBindingAsync(
+        EdgeDashboardDeviceBindingSaveDto dto)
+    {
+        await ValidateDeviceBindingAsync(dto);
+        var now = DateTime.Now;
+        var existing = dto.Id > 0
+            ? await Db.Queryable<EdgeDashboardDeviceBindingEntity>()
+                .FirstAsync(x => x.Id == dto.Id && x.IsDelete == 0)
+            : await Db.Queryable<EdgeDashboardDeviceBindingEntity>().FirstAsync(x =>
+                x.DashboardCode == dto.DashboardCode &&
+                x.LineCode == dto.LineCode &&
+                x.DeviceCode == dto.DeviceCode &&
+                x.IsDelete == 0);
+        if (dto.Id > 0 && existing == null)
+            throw new InvalidOperationException("设备绑定不存在");
+
+        var entity = _mapper.Map<EdgeDashboardDeviceBindingEntity>(dto);
+        entity.UpdateTime = now;
+        if (existing == null)
+        {
+            entity.CreateTime = now;
+        }
+        else
+        {
+            entity.Id = existing.Id;
+            entity.CreateTime = existing.CreateTime;
+        }
+
+        var transaction = await Db.Ado.UseTranAsync(async () =>
+        {
+            if (entity.Id == 0)
+                entity.Id = await Db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+            else
+                await Db.Updateable(entity).ExecuteCommandAsync();
+
+            await Db.Deleteable<EdgeDashboardDeviceFieldBindingEntity>()
+                .Where(x => x.DeviceBindingId == entity.Id)
+                .ExecuteCommandAsync();
+            var fields = dto.Fields.Select((item, index) =>
+            {
+                var field = _mapper.Map<EdgeDashboardDeviceFieldBindingEntity>(item);
+                field.Id = 0;
+                field.DeviceBindingId = entity.Id;
+                field.Sort = item.Sort == 0 ? index : item.Sort;
+                field.CreateTime = now;
+                field.UpdateTime = now;
+                return field;
+            }).ToList();
+            if (fields.Count > 0) await Db.Insertable(fields).ExecuteCommandAsync();
+        });
+        if (!transaction.IsSuccess)
+            throw transaction.ErrorException ?? new InvalidOperationException("保存设备绑定事务失败");
+
+        return (await BuildDeviceBindingOutputsAsync([entity])).Single();
+    }
+
+    /// <summary>软删除设备绑定，不影响实时采集原始数据。</summary>
+    public async Task DeleteDeviceBindingAsync(long id)
+    {
+        var binding = await Db.Queryable<EdgeDashboardDeviceBindingEntity>()
+            .FirstAsync(x => x.Id == id && x.IsDelete == 0);
+        if (binding == null) throw new InvalidOperationException("设备绑定不存在");
+        binding.IsDelete = 1;
+        binding.Enabled = false;
+        binding.UpdateTime = DateTime.Now;
+        await Db.Updateable(binding).ExecuteCommandAsync();
+    }
+
     /// <summary>软删除绑定，并关闭活动故障，避免统计状态继续运行。</summary>
     public async Task DeleteBindingAsync(long id)
     {
@@ -395,16 +475,24 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     /// <summary>批量解析一条线体的机械手当前状态和多字段显示值。</summary>
     public async Task<EdgeDashboardLineRuntimeDto> GetLineRuntimeAsync(string lineCode)
     {
-            lineCode = Require(lineCode, "lineCode");
+        lineCode = Require(lineCode, "lineCode");
         var bindings = await Db.Queryable<EdgeDashboardRobotBindingEntity>()
             .Where(x => x.LineCode == lineCode && x.Enabled && x.IsDelete == 0)
             .OrderBy(x => x.RobotCode)
             .ToListAsync();
-        if (bindings.Count == 0)
+        var deviceBindings = await Db.Queryable<EdgeDashboardDeviceBindingEntity>()
+            .Where(x => x.LineCode == lineCode && x.Enabled && x.IsDelete == 0)
+            .OrderBy(x => x.DeviceCode)
+            .ToListAsync();
+        if (bindings.Count == 0 && deviceBindings.Count == 0)
             return new EdgeDashboardLineRuntimeDto { LineCode = lineCode };
 
         var bindingIds = bindings.Select(x => x.Id).ToList();
-        var deviceMarks = bindings.Select(x => x.DeviceMark).Distinct().ToList();
+        var deviceBindingIds = deviceBindings.Select(x => x.Id).ToList();
+        var deviceMarks = bindings.Select(x => x.DeviceMark)
+            .Concat(deviceBindings.Select(x => x.SourceDeviceMark))
+            .Distinct()
+            .ToList();
         var fields = await Db.Queryable<EdgeDashboardRobotFieldBindingEntity>()
             .Where(x => bindingIds.Contains(x.RobotBindingId) && x.Enabled && x.IsDelete == 0)
             .OrderBy(x => x.Sort)
@@ -412,11 +500,17 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         var states = await Db.Queryable<EdgeDashboardRobotRuntimeStateEntity>()
             .Where(x => bindingIds.Contains(x.RobotBindingId))
             .ToListAsync();
+        var deviceFields = await Db.Queryable<EdgeDashboardDeviceFieldBindingEntity>()
+            .Where(x => deviceBindingIds.Contains(x.DeviceBindingId) && x.Enabled && x.IsDelete == 0)
+            .OrderBy(x => x.Sort)
+            .ToListAsync();
         var snapshots = await Db.Queryable<EdgeRealtimeDeviceSnapshotEntity>()
             .Where(x => deviceMarks.Contains(x.DeviceCode))
             .ToListAsync();
 
         var fieldGroups = fields.GroupBy(x => x.RobotBindingId)
+            .ToDictionary(x => x.Key, x => x.ToList());
+        var deviceFieldGroups = deviceFields.GroupBy(x => x.DeviceBindingId)
             .ToDictionary(x => x.Key, x => x.ToList());
         var stateMap = states.ToDictionary(x => x.RobotBindingId);
         var snapshotMap = snapshots.ToDictionary(
@@ -468,6 +562,43 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                 }
             }
             output.Robots.Add(robot);
+        }
+        foreach (var binding in deviceBindings)
+        {
+            snapshotMap.TryGetValue($"{binding.TenantMark}\u001f{binding.SourceDeviceMark}", out var snapshot);
+            var device = new EdgeDashboardDeviceRuntimeDto
+            {
+                BindingId = binding.Id,
+                LineCode = binding.LineCode,
+                DeviceCode = binding.DeviceCode,
+                DeviceName = binding.DeviceName,
+                TenantMark = binding.TenantMark,
+                SourceDeviceMark = binding.SourceDeviceMark,
+                DataOnline = snapshot != null &&
+                             snapshot.ReceiveTime >= now.AddSeconds(-binding.OnlineTimeoutSeconds),
+                DataTime = snapshot?.DataTime,
+                ReceiveTime = snapshot?.ReceiveTime
+            };
+            if (snapshot != null)
+            {
+                var envelope = EdgeDashboardJsonFieldResolver.BuildEnvelope(snapshot);
+                foreach (var field in deviceFieldGroups.GetValueOrDefault(binding.Id) ?? [])
+                {
+                    var rawToken = EdgeDashboardJsonFieldResolver.Resolve(envelope, field.SourcePath);
+                    device.Fields.Add(new EdgeDashboardRuntimeFieldDto
+                    {
+                        FieldCode = field.FieldCode,
+                        SourcePath = field.SourcePath,
+                        DisplayName = field.DisplayName,
+                        Purpose = "DisplayValue",
+                        RawValue = EdgeDashboardJsonFieldResolver.ToObject(rawToken),
+                        DisplayValue = FormatDeviceFieldValue(rawToken, field),
+                        Unit = field.Unit,
+                        Sort = field.Sort
+                    });
+                }
+            }
+            output.Devices.Add(device);
         }
         return output;
     }
@@ -708,7 +839,9 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     /// 一次读取线体主配置和全部场景，避免看板首次进入时按线体重复请求。
     /// 旧版本仅有场景表时，会把场景中的线体元数据一次性迁移到线体主表。
     /// </summary>
-    public async Task<EdgeDashboardBootstrapOutputDto> GetBootstrapAsync(string dashboardCode)
+    public async Task<EdgeDashboardBootstrapOutputDto> GetBootstrapAsync(
+        string dashboardCode,
+        bool migrateLegacyScenes = true)
     {
         dashboardCode = Require(dashboardCode, "看板编码");
         var scenes = await Db.Queryable<EdgeDashboardSceneLayoutEntity>()
@@ -723,7 +856,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
 
         var hasLineHistory = await Db.Queryable<EdgeDashboardLineConfigEntity>()
             .AnyAsync(x => x.DashboardCode == dashboardCode);
-        if (lines.Count == 0 && !hasLineHistory && scenes.Count > 0)
+        if (migrateLegacyScenes && lines.Count == 0 && !hasLineHistory && scenes.Count > 0)
         {
             var migratedLines = scenes.Select((scene, index) =>
                 CreateLineConfigFromScene(scene, index * 10)).ToList();
@@ -770,10 +903,12 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         if (dto.Id > 0 && existing == null)
             throw new InvalidOperationException("线体配置不存在");
 
+        // 先在表达式外求出值，避免 SqlSugar 解析闭包中的“对象为空 ? 0 : 对象.Id”时访问空对象。
+        var existingId = existing?.Id ?? 0;
         var duplicate = await Db.Queryable<EdgeDashboardLineConfigEntity>().AnyAsync(x =>
             x.DashboardCode == dto.DashboardCode &&
             x.LineCode == dto.LineCode &&
-            x.Id != (existing == null ? 0 : existing.Id) &&
+            x.Id != existingId &&
             x.IsDelete == 0);
         if (duplicate) throw new InvalidOperationException("同一看板的线体编码不能重复");
 
@@ -783,7 +918,24 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         if (existing == null)
         {
             entity.CreateTime = now;
-            entity.Id = await Db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+            var scene = new EdgeDashboardSceneLayoutEntity
+            {
+                DashboardCode = entity.DashboardCode,
+                LineCode = entity.LineCode,
+                LineName = entity.LineName,
+                LayoutVersion = 1,
+                Revision = 1,
+                LayoutJson = CreateEmptySceneLayoutJson(entity.LineCode, entity.LineName, now),
+                CreateTime = now,
+                UpdateTime = now
+            };
+            var transaction = await Db.Ado.UseTranAsync(async () =>
+            {
+                entity.Id = await Db.Insertable(entity).ExecuteReturnBigIdentityAsync();
+                await Db.Insertable(scene).ExecuteCommandAsync();
+            });
+            if (!transaction.IsSuccess)
+                throw transaction.ErrorException ?? new InvalidOperationException("新增线体和初始场景事务失败");
         }
         else
         {
@@ -817,6 +969,17 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                 .SetColumns(x => new EdgeDashboardSceneLayoutEntity
                 {
                     IsDelete = 1,
+                    UpdateTime = now
+                })
+                .Where(x => x.DashboardCode == dashboardCode &&
+                            x.LineCode == lineCode &&
+                            x.IsDelete == 0)
+                .ExecuteCommandAsync();
+            await Db.Updateable<EdgeDashboardDeviceBindingEntity>()
+                .SetColumns(x => new EdgeDashboardDeviceBindingEntity
+                {
+                    IsDelete = 1,
+                    Enabled = false,
                     UpdateTime = now
                 })
                 .Where(x => x.DashboardCode == dashboardCode &&
@@ -882,7 +1045,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     }
 
     /// <summary>
-    /// 修改线体编码，并在同一事务内同步场景、机械手绑定、统计、故障和图表配置。
+    /// 修改线体编码，并在同一事务内同步场景、机械手/设备绑定、统计、故障和图表配置。
     /// 机械手编码保持不变，避免破坏已经建立的数据源绑定和历史统计主键。
     /// </summary>
     public async Task<EdgeDashboardSceneLayoutOutputDto> ChangeLineCodeAsync(
@@ -916,6 +1079,10 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
             x.DashboardCode == dto.DashboardCode &&
             x.LineCode == dto.NewLineCode &&
             x.IsDelete == 0);
+        var deviceBindingConflict = await Db.Queryable<EdgeDashboardDeviceBindingEntity>().AnyAsync(x =>
+            x.DashboardCode == dto.DashboardCode &&
+            x.LineCode == dto.NewLineCode &&
+            x.IsDelete == 0);
         var widgetConflict = await Db.Queryable<EdgeDashboardWidgetEntity>().AnyAsync(x =>
             x.DashboardCode == dto.DashboardCode &&
             x.LineCode == dto.NewLineCode &&
@@ -929,7 +1096,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
             x.LineCode == dto.NewLineCode &&
             x.Id != (lineConfig == null ? 0 : lineConfig.Id) &&
             x.IsDelete == 0);
-        if (sceneConflict || bindingConflict || widgetConflict || lineConflict)
+        if (sceneConflict || bindingConflict || deviceBindingConflict || widgetConflict || lineConflict)
             throw new InvalidOperationException("新线体编码已存在关联配置，请更换编码");
 
         var bindingIds = await Db.Queryable<EdgeDashboardRobotBindingEntity>()
@@ -974,6 +1141,16 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
 
             await Db.Updateable<EdgeDashboardRobotBindingEntity>()
                 .SetColumns(x => new EdgeDashboardRobotBindingEntity
+                {
+                    LineCode = dto.NewLineCode,
+                    UpdateTime = now
+                })
+                .Where(x => x.DashboardCode == dto.DashboardCode &&
+                            x.LineCode == dto.OldLineCode)
+                .ExecuteCommandAsync();
+
+            await Db.Updateable<EdgeDashboardDeviceBindingEntity>()
+                .SetColumns(x => new EdgeDashboardDeviceBindingEntity
                 {
                     LineCode = dto.NewLineCode,
                     UpdateTime = now
@@ -1086,6 +1263,47 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                     string.IsNullOrWhiteSpace(rule.FaultReasonPath))
                     throw new InvalidOperationException("故障规则必须配置固定原因或原因字段");
             }
+        }
+    }
+
+    /// <summary>校验设备组件、实时数据源和展示字段，不附加机械手统计状态规则。</summary>
+    private async Task ValidateDeviceBindingAsync(EdgeDashboardDeviceBindingSaveDto dto)
+    {
+        dto.DashboardCode = Require(dto.DashboardCode, "看板编码");
+        dto.LineCode = Require(dto.LineCode, "线体编码");
+        dto.DeviceCode = Require(dto.DeviceCode, "Three.js 设备编码");
+        dto.TenantMark = Require(dto.TenantMark, "tenantMark");
+        dto.SourceDeviceMark = Require(dto.SourceDeviceMark, "deviceMark");
+        dto.OnlineTimeoutSeconds = Math.Clamp(dto.OnlineTimeoutSeconds, 6, 3600);
+
+        var scene = await GetSceneLayoutAsync(dto.DashboardCode, dto.LineCode);
+        if (scene == null) throw new InvalidOperationException("该线体尚未创建 Three.js 场景");
+        var root = JObject.Parse(scene.LayoutJson);
+        var device = (root["devices"] as JArray)?.OfType<JObject>().FirstOrDefault(item =>
+            string.Equals(item.Value<string>("id"), dto.DeviceCode, StringComparison.OrdinalIgnoreCase));
+        if (device == null) throw new InvalidOperationException("Three.js 场景中不存在指定设备组件");
+        dto.DeviceName = device.Value<string>("name") ?? Require(dto.DeviceName, "设备名称");
+
+        var duplicate = await Db.Queryable<EdgeDashboardDeviceBindingEntity>().AnyAsync(x =>
+            x.DashboardCode == dto.DashboardCode && x.LineCode == dto.LineCode &&
+            x.DeviceCode == dto.DeviceCode && x.Id != dto.Id && x.IsDelete == 0);
+        if (duplicate) throw new InvalidOperationException("同一线体的设备组件不能重复绑定");
+
+        var snapshot = await Db.Queryable<EdgeRealtimeDeviceSnapshotEntity>()
+            .FirstAsync(x => x.TenantMark == dto.TenantMark && x.DeviceCode == dto.SourceDeviceMark);
+        if (snapshot == null) throw new InvalidOperationException("选择的 HTTP 数据源不存在");
+        var envelope = EdgeDashboardJsonFieldResolver.BuildEnvelope(snapshot);
+
+        if (dto.Fields.Select(x => x.FieldCode.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).Count()
+            != dto.Fields.Count)
+            throw new InvalidOperationException("同一设备的字段编码不能重复");
+        foreach (var field in dto.Fields)
+        {
+            field.FieldCode = Require(field.FieldCode, "字段编码");
+            field.SourcePath = ValidateSourcePath(field.SourcePath, envelope);
+            field.DisplayName = Require(field.DisplayName, "字段名称");
+            if (!string.IsNullOrWhiteSpace(field.MappingJson))
+                ParseJsonObject(field.MappingJson, "字段值映射 JSON");
         }
     }
 
@@ -1236,6 +1454,24 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                 fields.Where(x => x.RobotBindingId == binding.Id));
             output.StateRules = _mapper.Map<List<EdgeDashboardRobotStateRuleSaveDto>>(
                 rules.Where(x => x.RobotBindingId == binding.Id));
+            return output;
+        }).ToList();
+    }
+
+    private async Task<List<EdgeDashboardDeviceBindingOutputDto>> BuildDeviceBindingOutputsAsync(
+        List<EdgeDashboardDeviceBindingEntity> bindings)
+    {
+        if (bindings.Count == 0) return [];
+        var ids = bindings.Select(x => x.Id).ToList();
+        var fields = await Db.Queryable<EdgeDashboardDeviceFieldBindingEntity>()
+            .Where(x => ids.Contains(x.DeviceBindingId) && x.IsDelete == 0)
+            .OrderBy(x => x.Sort)
+            .ToListAsync();
+        return bindings.Select(binding =>
+        {
+            var output = _mapper.Map<EdgeDashboardDeviceBindingOutputDto>(binding);
+            output.Fields = _mapper.Map<List<EdgeDashboardDeviceFieldSaveDto>>(
+                fields.Where(x => x.DeviceBindingId == binding.Id));
             return output;
         }).ToList();
     }
@@ -1407,6 +1643,27 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         return raw;
     }
 
+    private static object? FormatDeviceFieldValue(
+        JToken? rawToken,
+        EdgeDashboardDeviceFieldBindingEntity field)
+    {
+        if (rawToken == null) return null;
+        var raw = EdgeDashboardJsonFieldResolver.ToObject(rawToken);
+        if (field.FormatType == "ValueMap" && !string.IsNullOrWhiteSpace(field.MappingJson))
+        {
+            var map = JsonConvert.DeserializeObject<Dictionary<string, object?>>(field.MappingJson);
+            var key = Convert.ToString(raw) ?? string.Empty;
+            if (map != null && map.TryGetValue(key, out var mapped)) return mapped;
+            if (map != null && map.TryGetValue("*", out mapped)) return mapped;
+        }
+        if (field.FormatType == "UnixMilliseconds" && long.TryParse(Convert.ToString(raw), out var value))
+            return DateTimeOffset.FromUnixTimeMilliseconds(value).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+        if (raw is decimal or double or float && field.Decimals.HasValue &&
+            decimal.TryParse(Convert.ToString(raw), out var number))
+            return Math.Round(number, Math.Clamp(field.Decimals.Value, 0, 8));
+        return raw;
+    }
+
     private static EdgeDashboardFieldCatalogDto Field(
         string key,
         string name,
@@ -1526,6 +1783,21 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         }
     }
 
+    /// <summary>新增线体时一并写入可直接编辑的空 Three.js 场景。</summary>
+    private static string CreateEmptySceneLayoutJson(string lineCode, string lineName, DateTime now) =>
+        new JObject
+        {
+            ["version"] = 1,
+            ["lineId"] = lineCode,
+            ["lineName"] = lineName,
+            ["updatedAt"] = now.ToUniversalTime().ToString("O"),
+            ["robots"] = new JArray(),
+            ["devices"] = new JArray(),
+            ["conveyors"] = new JArray(),
+            ["workCells"] = new JArray(),
+            ["junctions"] = new JArray()
+        }.ToString(Formatting.None);
+
     /// <summary>验证前端 Three.js 布局的关键结构，并压缩 JSON 后入库。</summary>
     private static string ValidateSceneLayoutJson(
         string? json,
@@ -1552,6 +1824,11 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                 if (root[propertyName]?.Type != JTokenType.Array)
                     throw new InvalidOperationException($"场景布局中的 {propertyName} 必须是数组");
             }
+
+            if (root["devices"] == null)
+                root["devices"] = new JArray();
+            else if (root["devices"]?.Type != JTokenType.Array)
+                throw new InvalidOperationException("场景布局中的 devices 必须是数组");
 
             return root.ToString(Formatting.None);
         }

@@ -26,9 +26,7 @@ builder.Services.AddSwaggerGen();
 
 builder.Services.AddHttpClient();
 // Ìí¼ÓÅäÖÃÎÄ¼ş
-builder.Configuration
-       .SetBasePath(AppContext.BaseDirectory)
-       .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+// WebApplication.CreateBuilder already loads base and environment-specific appsettings files.
 builder.Register();
 builder.Services.AddScoped<AgentWebSocketHandler>();
 

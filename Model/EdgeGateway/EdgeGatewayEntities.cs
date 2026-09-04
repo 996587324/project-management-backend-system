@@ -79,6 +79,70 @@ public class EdgeWebSocketSourceEntity
     public DateTime? UpdateTime { get; set; } = DateTime.Now;
 }
 
+/// <summary>边缘节点向上游 WebSocket 发送订阅或请求报文的中心端审计记录。</summary>
+[SugarTable("EdgeGatewayWebSocketSendRecord")]
+public class EdgeWebSocketSendRecordEntity
+{
+    [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+    public long Id { get; set; }
+    [SugarColumn(Length = 64)]
+    public string DeviceCode { get; set; } = string.Empty;
+    [SugarColumn(Length = 64)]
+    public string SourceId { get; set; } = string.Empty;
+    [SugarColumn(Length = 128, IsNullable = true)]
+    public string? SourceName { get; set; }
+    [SugarColumn(Length = 1024, IsNullable = true)]
+    public string? Endpoint { get; set; }
+    /// <summary>InitialSubscription 或 SubscriptionUpdate。</summary>
+    [SugarColumn(Length = 32)]
+    public string SendType { get; set; } = "InitialSubscription";
+    [SugarColumn(ColumnDataType = "nvarchar(max)")]
+    public string Payload { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    [SugarColumn(Length = 512, IsNullable = true)]
+    public string? ErrorMessage { get; set; }
+    public int DurationMs { get; set; }
+    public DateTime CreateTime { get; set; } = DateTime.Now;
+}
+
+/// <summary>
+/// WebSocket 接收数据日表实体。SqlSugar 以 CreateTime 为分表字段，自动写入
+/// EdgeGatewayWebSocketReceiveRecord_yyyyMMdd 日表；保留策略由日志清理服务执行。
+/// </summary>
+[SugarTable("EdgeGatewayWebSocketReceiveRecord_{year}{month}{day}")]
+[SplitTable(SplitType.Day)]
+[SugarIndex(
+    "IX_EdgeGatewayWebSocketReceiveRecord_Filter",
+    nameof(DeviceCode), OrderByType.Asc,
+    nameof(SourceId), OrderByType.Asc,
+    nameof(SourceDeviceCode), OrderByType.Asc,
+    nameof(CreateTime), OrderByType.Desc,
+    false)]
+public class EdgeWebSocketReceiveRecordEntity
+{
+    /// <summary>日表主键。分表不支持数据库自增列，写入时由 SqlSugar 生成雪花 ID。</summary>
+    [SugarColumn(IsPrimaryKey = true)]
+    public long Id { get; set; }
+    [SugarColumn(Length = 64)]
+    public string MessageId { get; set; } = string.Empty;
+    [SugarColumn(Length = 64)]
+    public string DeviceCode { get; set; } = string.Empty;
+    [SugarColumn(Length = 64)]
+    public string SourceId { get; set; } = string.Empty;
+    [SugarColumn(Length = 128, IsNullable = true)]
+    public string? SourceDeviceCode { get; set; }
+    [SugarColumn(Length = 64)]
+    public string DataType { get; set; } = "Telemetry";
+    /// <summary>经过 WebSocket 拆包后的原始业务数据报文。</summary>
+    [SugarColumn(ColumnDataType = "nvarchar(max)")]
+    public string RawPayload { get; set; } = "{}";
+    /// <summary>上游报文中携带或边缘节点生成的业务时间。</summary>
+    public DateTime MessageTime { get; set; }
+    /// <summary>中心端实际接收并入库的时间，也是日表分表依据。</summary>
+    [SplitField]
+    public DateTime CreateTime { get; set; } = DateTime.Now;
+}
+
 /// <summary>中心 SQL Server 中某个 WebSocket 连接订阅的业务设备。</summary>
 [SugarTable("EdgeGatewayWebSocketSubscriptionDevice")]
 public class EdgeWebSocketSubscriptionDeviceEntity

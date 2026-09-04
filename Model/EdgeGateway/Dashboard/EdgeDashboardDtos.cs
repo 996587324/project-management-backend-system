@@ -88,6 +88,44 @@ public class EdgeDashboardRobotBindingOutputDto : EdgeDashboardRobotBindingSaveD
     public DateTime UpdateTime { get; set; }
 }
 
+/// <summary>Three.js 设备组件展示字段配置。</summary>
+public class EdgeDashboardDeviceFieldSaveDto
+{
+    public long Id { get; set; }
+    public string FieldCode { get; set; } = string.Empty;
+    public string SourcePath { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
+    public string ValueType { get; set; } = "String";
+    public string FormatType { get; set; } = "Direct";
+    public string? Unit { get; set; }
+    public int? Decimals { get; set; }
+    public string? MappingJson { get; set; }
+    public int Sort { get; set; }
+    public bool Enabled { get; set; } = true;
+}
+
+/// <summary>完整保存 Three.js 设备组件的数据源与展示字段。</summary>
+public class EdgeDashboardDeviceBindingSaveDto
+{
+    public long Id { get; set; }
+    public string DashboardCode { get; set; } = "production-dashboard";
+    public string LineCode { get; set; } = string.Empty;
+    public string DeviceCode { get; set; } = string.Empty;
+    public string DeviceName { get; set; } = string.Empty;
+    public string TenantMark { get; set; } = string.Empty;
+    public string SourceDeviceMark { get; set; } = string.Empty;
+    public int OnlineTimeoutSeconds { get; set; } = 15;
+    public bool Enabled { get; set; } = true;
+    public List<EdgeDashboardDeviceFieldSaveDto> Fields { get; set; } = [];
+}
+
+/// <summary>设备绑定的管理端输出。</summary>
+public class EdgeDashboardDeviceBindingOutputDto : EdgeDashboardDeviceBindingSaveDto
+{
+    public DateTime CreateTime { get; set; }
+    public DateTime UpdateTime { get; set; }
+}
+
 /// <summary>按设备模型保存的一条报警映射规则。</summary>
 public class EdgeDashboardModelAlarmRuleSaveDto
 {
@@ -166,12 +204,28 @@ public class EdgeDashboardRobotRuntimeDto
     public List<EdgeDashboardRuntimeFieldDto> Fields { get; set; } = [];
 }
 
+/// <summary>Three.js 设备组件当前的在线状态与展示字段。</summary>
+public class EdgeDashboardDeviceRuntimeDto
+{
+    public long BindingId { get; set; }
+    public string LineCode { get; set; } = string.Empty;
+    public string DeviceCode { get; set; } = string.Empty;
+    public string DeviceName { get; set; } = string.Empty;
+    public string TenantMark { get; set; } = string.Empty;
+    public string SourceDeviceMark { get; set; } = string.Empty;
+    public bool DataOnline { get; set; }
+    public DateTime? DataTime { get; set; }
+    public DateTime? ReceiveTime { get; set; }
+    public List<EdgeDashboardRuntimeFieldDto> Fields { get; set; } = [];
+}
+
 /// <summary>线体看板一次批量刷新返回的全部机械手。</summary>
 public class EdgeDashboardLineRuntimeDto
 {
     public string LineCode { get; set; } = string.Empty;
     public DateTime GeneratedAt { get; set; } = DateTime.Now;
     public List<EdgeDashboardRobotRuntimeDto> Robots { get; set; } = [];
+    public List<EdgeDashboardDeviceRuntimeDto> Devices { get; set; } = [];
 }
 
 /// <summary>每日机械手统计查询条件。</summary>

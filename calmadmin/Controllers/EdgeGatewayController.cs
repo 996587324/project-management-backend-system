@@ -135,6 +135,13 @@ public class EdgeGatewayController : ControllerBase
     public async Task<IActionResult> DeleteWebSocketSource(int id) =>
         Success(await _webSocketSourceService.DeleteAsync(id), "WebSocket 连接已删除");
 
+    /// <summary>停用所有设备下当前已启用的 WebSocket 连接，保留配置供后续重新启用。</summary>
+    [HttpPost("websocket-sources/disable-all")]
+    public async Task<IActionResult> DisableAllWebSocketSources() =>
+        await ExecuteAsync(
+            () => _webSocketSourceService.DisableAllAsync(),
+            "全部 WebSocket 连接已停用并下发");
+
     /// <summary>通知指定设备重建全部已启用 WebSocket 连接。</summary>
     [HttpPost("devices/{deviceId:int}/websocket-sources/reconnect")]
     public async Task<IActionResult> ReconnectDeviceWebSocketSources(int deviceId) =>
@@ -221,6 +228,26 @@ public class EdgeGatewayController : ControllerBase
     [HttpGet("upload-records")]
     public async Task<IActionResult> GetUploadRecords([FromQuery] EdgeUploadRecordQueryDto query) =>
         Success(await _service.GetUploadRecordPageAsync(query));
+
+    /// <summary>分页查询边缘节点向上游 WebSocket 发送的报文及结果。</summary>
+    [HttpGet("websocket-send-records")]
+    public async Task<IActionResult> GetWebSocketSendRecords([FromQuery] EdgeWebSocketSendRecordQueryDto query) =>
+        Success(await _service.GetWebSocketSendRecordPageAsync(query));
+
+    /// <summary>分页查询最近七天 WebSocket 接收数据日表。</summary>
+    [HttpGet("websocket-receive-records")]
+    public async Task<IActionResult> GetWebSocketReceiveRecords([FromQuery] EdgeWebSocketReceiveRecordQueryDto query) =>
+        Success(await _service.GetWebSocketReceiveRecordPageAsync(query));
+
+    /// <summary>接收边缘节点上报的 WebSocket 报文发送结果。</summary>
+    [HttpPost("websocket-send-records")]
+    public async Task<IActionResult> ReportWebSocketSendRecord([FromBody] EdgeWebSocketSendRecordReportDto dto)
+    {
+        var unauthorized = ValidateMachineKey();
+        return unauthorized ?? Success(
+            new { id = await _service.ReportWebSocketSendRecordAsync(dto) },
+            "WebSocket 发送记录已保存");
+    }
 
     /// <summary>接收边缘节点批量上传的标准消息。</summary>
     [HttpPost("messages")]

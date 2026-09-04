@@ -100,6 +100,19 @@ public class CenterApiClient : ICenterApiClient
         response.EnsureSuccessStatusCode();
     }
 
+    /// <summary>向中心端上报一次 WebSocket 报文发送结果。</summary>
+    public async Task ReportWebSocketSendRecordAsync(
+        EdgeWebSocketSendRecordReportDto record,
+        CancellationToken cancellationToken)
+    {
+        // 设备编码以节点自身引导配置为准，避免由运行时数据源配置伪造或遗漏。
+        record.DeviceCode = _bootstrapOptions.DeviceId;
+        using var request = CreateRequest(HttpMethod.Post, "api/EdgeGateway/websocket-send-records");
+        request.Content = JsonContent.Create(record, options: JsonOptions);
+        using var response = await _client.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+
     /// <summary>创建中心端请求，并在配置了 ApiKey 时附加机器认证请求头。</summary>
     private HttpRequestMessage CreateRequest(HttpMethod method, string relativePath)
     {

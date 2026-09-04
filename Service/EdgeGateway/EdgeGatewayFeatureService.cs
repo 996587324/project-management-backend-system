@@ -13,7 +13,6 @@ public sealed class EdgeGatewayFeatureService : IEdgeGatewayFeatureService
     private static readonly SemaphoreSlim CreateGate = new(1, 1);
     private readonly SqlSugarScope _dbScope;
     private readonly IMapper _mapper;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
     /// <summary>通过 IOC 注入项目单例 SqlSugarScope 和 AutoMapper。</summary>
     public EdgeGatewayFeatureService(SqlSugarScope dbScope, IMapper mapper)
@@ -23,20 +22,24 @@ public sealed class EdgeGatewayFeatureService : IEdgeGatewayFeatureService
     }
 
     /// <summary>读取单例设置；旧项目没有记录时默认开启，保持升级前运行行为。</summary>
-    public async Task<EdgeGatewayFeatureSettingOutputDto> GetSettingAsync() =>
-        _mapper.Map<EdgeGatewayFeatureSettingOutputDto>(await GetOrCreateSettingAsync());
+    public async Task<EdgeGatewayFeatureSettingOutputDto> GetSettingAsync()
+    {
+        using var db = CreateIndependentDb();
+        return _mapper.Map<EdgeGatewayFeatureSettingOutputDto>(await GetOrCreateSettingAsync(db));
+    }
 
     /// <summary>持久化全局开关和操作人，并写入 EdgeGateway 操作日志。</summary>
     public async Task<EdgeGatewayFeatureSettingOutputDto> SaveSettingAsync(
         EdgeGatewayFeatureSettingSaveDto dto)
     {
-        var entity = await GetOrCreateSettingAsync();
+        using var db = CreateIndependentDb();
+        var entity = await GetOrCreateSettingAsync(db);
         _mapper.Map(dto, entity);
         entity.UpdateTime = DateTime.Now;
-        await Db.Updateable(entity)
+        await db.Updateable(entity)
             .UpdateColumns(x => new { x.Enabled, x.UpdatedBy, x.UpdateTime })
             .ExecuteCommandAsync();
-        await Db.Insertable(new EdgeOperationLogEntity
+        await db.Insertable(new EdgeOperationLogEntity
         {
             OperationType = "FeatureSetting.Update",
             Target = "EdgeGateway",
@@ -47,7 +50,11 @@ public sealed class EdgeGatewayFeatureService : IEdgeGatewayFeatureService
     }
 
     /// <summary>读取数据库开关，后台循环每次检查时都能获得最新值。</summary>
-    public async Task<bool> IsEnabledAsync() => (await GetOrCreateSettingAsync()).Enabled;
+    public async Task<bool> IsEnabledAsync()
+    {
+        using var db = CreateIndependentDb();
+        return (await GetOrCreateSettingAsync(db)).Enabled;
+    }
 
     /// <summary>阻止关闭状态下继续接收新数据或向 B 系统转发。</summary>
     public async Task EnsureEnabledAsync()
@@ -57,16 +64,16 @@ public sealed class EdgeGatewayFeatureService : IEdgeGatewayFeatureService
     }
 
     /// <summary>并发安全地创建主键为 1 的默认设置记录。</summary>
-    private async Task<EdgeGatewayFeatureSettingEntity> GetOrCreateSettingAsync()
+    private async Task<EdgeGatewayFeatureSettingEntity> GetOrCreateSettingAsync(ISqlSugarClient db)
     {
-        var setting = await Db.Queryable<EdgeGatewayFeatureSettingEntity>()
+        var setting = await db.Queryable<EdgeGatewayFeatureSettingEntity>()
             .FirstAsync(x => x.Id == SettingId);
         if (setting != null) return setting;
 
         await CreateGate.WaitAsync();
         try
         {
-            setting = await Db.Queryable<EdgeGatewayFeatureSettingEntity>()
+            setting = await db.Queryable<EdgeGatewayFeatureSettingEntity>()
                 .FirstAsync(x => x.Id == SettingId);
             if (setting != null) return setting;
 
@@ -77,7 +84,7 @@ public sealed class EdgeGatewayFeatureService : IEdgeGatewayFeatureService
                 CreateTime = DateTime.Now,
                 UpdateTime = DateTime.Now
             };
-            await Db.Insertable(setting).ExecuteCommandAsync();
+            await db.Insertable(setting).ExecuteCommandAsync();
             return setting;
         }
         finally
@@ -85,4 +92,8 @@ public sealed class EdgeGatewayFeatureService : IEdgeGatewayFeatureService
             CreateGate.Release();
         }
     }
+
+    /// <summary>为当前调用创建独立 SQL Server 客户端，避免后台任务共享 AsyncLocal 连接状态。</summary>
+    private ISqlSugarClient CreateIndependentDb() =>
+        _dbScope.GetConnection("calmadmin").CopyNew();
 }

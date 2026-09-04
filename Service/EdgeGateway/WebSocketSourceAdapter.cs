@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -14,16 +15,21 @@ namespace Service;
 /// </summary>
 public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptionUpdater
 {
+    private static readonly SemaphoreSlim SubscriptionSendPacingGate = new(1, 1);
+    private static readonly TimeSpan MinimumSubscriptionSendInterval = TimeSpan.FromSeconds(2);
+    private static DateTime _lastSubscriptionSendStartedUtc = DateTime.MinValue;
     private readonly ConcurrentDictionary<string, ActiveWebSocket> _activeConnections =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<WebSocketSourceAdapter> _logger;
+    private readonly ICenterApiClient _centerApi;
 
     /// <summary>用于匹配 SourceOptions.Protocol 的协议名称。</summary>
     public string Protocol => "WebSocket";
 
-    public WebSocketSourceAdapter(ILogger<WebSocketSourceAdapter> logger)
+    public WebSocketSourceAdapter(ILogger<WebSocketSourceAdapter> logger, ICenterApiClient centerApi)
     {
         _logger = logger;
+        _centerApi = centerApi;
     }
 
     /// <summary>
@@ -64,7 +70,8 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
 
                 // 目标接口要求连接成功后立即发送订阅，否则不会推送实时数据。
                 if (!string.IsNullOrWhiteSpace(source.SubscriptionPayload))
-                    await active.SendAsync(source.SubscriptionPayload, cancellationToken);
+                    await SendAndRecordAsync(source, active, source.SubscriptionPayload,
+                        "InitialSubscription", cancellationToken);
 
                 await ReceiveLoopAsync(source, active, onMessage, cancellationToken);
             }
@@ -141,7 +148,8 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
             return false;
         try
         {
-            await active.SendAsync(source.SubscriptionPayload ?? "{\"devices\":[]}", cancellationToken);
+            await SendAndRecordAsync(source, active, source.SubscriptionPayload ?? "{\"devices\":[]}",
+                "SubscriptionUpdate", cancellationToken);
             active.UpdateSubscriptions(source.SubscriptionDevices);
             _logger.LogInformation(
                 "WebSocket source {SourceId} subscription updated to version {SubscriptionVersion}",
@@ -181,6 +189,85 @@ public class WebSocketSourceAdapter : IEdgeSourceAdapter, IEdgeSourceSubscriptio
             cancellationToken.ThrowIfCancellationRequested();
             var payload = Encoding.UTF8.GetString(stream.ToArray());
             await DispatchPayloadAsync(source, active, payload, onMessage, cancellationToken);
+        }
+    }
+
+    /// <summary>发送 WebSocket 报文并异步上报成功或失败结果；记录失败不会影响实际采集连接。</summary>
+    private async Task SendAndRecordAsync(
+        SourceOptions source,
+        ActiveWebSocket active,
+        string payload,
+        string sendType,
+        CancellationToken cancellationToken)
+    {
+        // 全部重连、批量启用等场景可能同时建立大量连接。将真正的发送起点错开，
+        // 防止上游 WebSocket 服务在短时间内收到大量订阅报文而无法响应。
+        await WaitForSubscriptionSendSlotAsync(cancellationToken);
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            await active.SendAsync(payload, cancellationToken);
+            await ReportSendRecordSafelyAsync(source, payload, sendType, true, null,
+                (int)stopwatch.ElapsedMilliseconds, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await ReportSendRecordSafelyAsync(source, payload, sendType, false, ex.Message,
+                (int)stopwatch.ElapsedMilliseconds, CancellationToken.None);
+            throw;
+        }
+    }
+
+    /// <summary>同一边缘节点内任意两条 WebSocket 订阅/更新报文的发送间隔不少于两秒。</summary>
+    private static async Task WaitForSubscriptionSendSlotAsync(CancellationToken cancellationToken)
+    {
+        await SubscriptionSendPacingGate.WaitAsync(cancellationToken);
+        try
+        {
+            var remaining = _lastSubscriptionSendStartedUtc + MinimumSubscriptionSendInterval - DateTime.UtcNow;
+            if (remaining > TimeSpan.Zero)
+                await Task.Delay(remaining, cancellationToken);
+            _lastSubscriptionSendStartedUtc = DateTime.UtcNow;
+        }
+        finally
+        {
+            SubscriptionSendPacingGate.Release();
+        }
+    }
+
+    /// <summary>中心端不可用时只写诊断日志，不能把记录上报故障误判为 WebSocket 发送失败。</summary>
+    private async Task ReportSendRecordSafelyAsync(
+        SourceOptions source,
+        string payload,
+        string sendType,
+        bool success,
+        string? errorMessage,
+        int durationMs,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var reportCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            reportCancellation.CancelAfter(TimeSpan.FromSeconds(3));
+            await _centerApi.ReportWebSocketSendRecordAsync(new EdgeWebSocketSendRecordReportDto
+            {
+                SourceId = source.Id,
+                SourceName = source.Name,
+                Endpoint = source.Endpoint,
+                SendType = sendType,
+                Payload = payload,
+                Success = success,
+                ErrorMessage = errorMessage,
+                DurationMs = durationMs
+            }, reportCancellation.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogDebug(ex, "Failed to report WebSocket send record for source {SourceId}", source.Id);
         }
     }
 

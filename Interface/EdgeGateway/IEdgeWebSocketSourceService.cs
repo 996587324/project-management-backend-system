@@ -19,6 +19,8 @@ public interface IEdgeWebSocketSourceService
     Task<bool> SetEnabledAsync(int id, bool enabled);
     /// <summary>软删除 WebSocket 配置，并通知边缘节点停止对应连接。</summary>
     Task<bool> DeleteAsync(int id);
+    /// <summary>停用所有设备下已启用的 WebSocket 配置，并通知边缘节点停止对应连接。</summary>
+    Task<EdgeWebSocketReconnectResultDto> DisableAllAsync();
     /// <summary>提升指定设备全部已启用连接的运行版本，使 Worker 重新建立连接。</summary>
     Task<EdgeWebSocketReconnectResultDto> ReconnectDeviceAsync(int deviceId);
     /// <summary>提升所有设备已启用连接的运行版本，使在线 Worker 重新建立连接。</summary>

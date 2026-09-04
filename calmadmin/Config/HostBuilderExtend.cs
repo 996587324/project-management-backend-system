@@ -3,16 +3,19 @@ using Autofac.Extensions.DependencyInjection;
 using calmadmin.HostedServices;
 using Interface;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.IdentityModel.Tokens;
 using Model.Agent;
 using Model.EdgeGateway;
 using Model.Other;
+using Model.Pda;
 using Newtonsoft.Json;
 using Service;
 using SqlSugar;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Data.Common;
 using System.Text;
 using DbType = SqlSugar.DbType;
 
@@ -31,7 +34,9 @@ namespace 上传MES.Config
             string conn5 = builder.Configuration.GetConnectionString("recipe_results_db_ocv");
             string conn6 = builder.Configuration.GetConnectionString("recipe_results_db_dcir");
             string conn7 = builder.Configuration.GetConnectionString("calmadmin");
-            string conn8 = builder.Configuration.GetConnectionString("RoleMenuDb");
+            string edgeGatewayLogsConnection = builder.Configuration.GetConnectionString("EdgeGatewayLogs");
+            if (string.IsNullOrWhiteSpace(edgeGatewayLogsConnection))
+                edgeGatewayLogsConnection = BuildEdgeGatewayLogsConnectionString(conn7!);
             var edgeGatewayBootstrapOptions =
                 builder.Configuration.GetSection("EdgeGateway").Get<EdgeGatewayBootstrapOptions>()
                 ?? new EdgeGatewayBootstrapOptions();
@@ -118,6 +123,14 @@ namespace 上传MES.Config
                         },
                         new ConnectionConfig
                         {
+                            ConfigId = "edge-gateway-logs",
+                            ConnectionString = edgeGatewayLogsConnection,
+                            DbType = DbType.SqlServer,
+                            IsAutoCloseConnection = true,
+                            InitKeyType = InitKeyType.Attribute
+                        },
+                        new ConnectionConfig
+                        {
                             ConfigId = "edge-gateway",
                             ConnectionString = $"Data Source={edgeDatabasePath}",
                             DbType = DbType.Sqlite,
@@ -151,7 +164,13 @@ namespace 上传MES.Config
             builder.Services.AddSingleton(edgeGatewayBootstrapOptions);
             //注册JWT
             builder.Services.Configure<JWTTokenOptions>(builder.Configuration.GetSection("JWTTokenOptions"));
-            builder.Services.Configure<AgentOptions>(builder.Configuration.GetSection("AgentOptions"));
+            builder.Services.Configure<PdaOptions>(builder.Configuration.GetSection("PdaOptions"));
+            builder.Services.Configure<OAuth2Options>(builder.Configuration.GetSection("OAuth2"));
+            builder.Services.AddMemoryCache();
+            // 模型平台密钥通过 Data Protection 加密后保存到数据库，不允许配置管理接口返回明文。
+            builder.Services.AddDataProtection().SetApplicationName("CalmAdmin.AgentModelProvider");
+            builder.Services.AddSingleton<IAgentModelDatabaseInitializer, AgentModelDatabaseInitializer>();
+            builder.Services.AddSingleton<IAgentSecretProtector, AgentSecretProtector>();
             // 在 Worker 和自动转发循环启动前，只初始化一次 EdgeGateway 中心数据库结构。
             builder.Services.AddHostedService<EdgeGatewayDatabaseInitializationHostedService>();
             builder.Services.AddHostedService<EdgeGatewayHostedService>();
@@ -176,6 +195,8 @@ namespace 上传MES.Config
                      ValidateIssuer = true,//是否验证Issuer
                      ValidateAudience = true,//是否验证Audience
                      ValidateLifetime = true,//是否验证失效时间
+                     // PDA Token 不设置过期时间；其他来源的 Token 仍必须包含并校验过期时间。
+                     RequireExpirationTime = false,
                      ValidateIssuerSigningKey = true,//是否验证SecurityKey
                      ValidAudience = tokenOptions.Audience,//
                      ValidIssuer = tokenOptions.Issuer,//Issuer，这两项和前面签发jwt的设置一致
@@ -189,6 +210,21 @@ namespace 上传MES.Config
                              context.Request.Query.TryGetValue("access_token", out var accessToken))
                          {
                              context.Token = accessToken;
+                         }
+
+                         return Task.CompletedTask;
+                     },
+                     OnTokenValidated = context =>
+                     {
+                         var hasExpiration = context.SecurityToken.ValidTo != DateTime.MinValue;
+                         var isPdaToken = string.Equals(
+                             context.Principal?.FindFirst("LoginSource")?.Value,
+                             "PDA",
+                             StringComparison.OrdinalIgnoreCase);
+
+                         if (!hasExpiration && !isPdaToken)
+                         {
+                             context.Fail("无过期时间的 Token 仅允许用于 PDA");
                          }
 
                          return Task.CompletedTask;
@@ -297,6 +333,26 @@ namespace 上传MES.Config
             });
 
 
+        }
+
+        /// <summary>
+        /// 如果部署环境只覆盖了 calmadmin 连接，就沿用同一台 SQL Server 和账号，
+        /// 仅将数据库名切换为独立的 EdgeGatewayLogs，避免生产环境漏配第二条连接。
+        /// </summary>
+        private static string BuildEdgeGatewayLogsConnectionString(string calmadminConnectionString)
+        {
+            if (string.IsNullOrWhiteSpace(calmadminConnectionString))
+                throw new InvalidOperationException("未配置 calmadmin 数据库连接，无法生成 EdgeGatewayLogs 连接。");
+
+            var builder = new DbConnectionStringBuilder
+            {
+                ConnectionString = calmadminConnectionString
+            };
+            if (builder.ContainsKey("Initial Catalog"))
+                builder["Initial Catalog"] = "EdgeGatewayLogs";
+            else
+                builder["Database"] = "EdgeGatewayLogs";
+            return builder.ConnectionString;
         }
     }
 }

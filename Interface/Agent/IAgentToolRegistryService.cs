@@ -18,6 +18,11 @@ public interface IAgentToolRegistryService
     Task<AgentDefinitionEntity?> GetAgentAsync(string agentCode);
 
     /// <summary>
+    /// 查询代码注册的全部 Agent 定义，供模型平台绑定页面动态展示。
+    /// </summary>
+    Task<List<AgentDefinitionEntity>> GetAllAgentsAsync();
+
+    /// <summary>
     /// 查询指定 Agent 当前启用的工具列表。
     /// </summary>
     Task<List<AgentToolRegistryEntity>> GetEnabledToolsAsync(string agentCode);

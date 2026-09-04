@@ -61,6 +61,61 @@ public class EdgeDashboardRobotFieldBindingEntity
     public DateTime UpdateTime { get; set; } = DateTime.Now;
 }
 
+/// <summary>Three.js 设备组件与实时 HTTP 数据源的绑定；不参与机械手统计状态机。</summary>
+[SugarTable("EdgeDashboardDeviceBinding")]
+public class EdgeDashboardDeviceBindingEntity
+{
+    [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+    public long Id { get; set; }
+    [SugarColumn(Length = 64)]
+    public string DashboardCode { get; set; } = "production-dashboard";
+    [SugarColumn(Length = 64)]
+    public string LineCode { get; set; } = string.Empty;
+    [SugarColumn(Length = 64)]
+    public string DeviceCode { get; set; } = string.Empty;
+    [SugarColumn(Length = 128)]
+    public string DeviceName { get; set; } = string.Empty;
+    [SugarColumn(Length = 64)]
+    public string TenantMark { get; set; } = string.Empty;
+    [SugarColumn(Length = 128)]
+    public string SourceDeviceMark { get; set; } = string.Empty;
+    public int OnlineTimeoutSeconds { get; set; } = 15;
+    public bool Enabled { get; set; } = true;
+    public byte IsDelete { get; set; }
+    public DateTime CreateTime { get; set; } = DateTime.Now;
+    public DateTime UpdateTime { get; set; } = DateTime.Now;
+}
+
+/// <summary>Three.js 设备组件从实时数据源选择的展示字段。</summary>
+[SugarTable("EdgeDashboardDeviceFieldBinding")]
+public class EdgeDashboardDeviceFieldBindingEntity
+{
+    [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
+    public long Id { get; set; }
+    public long DeviceBindingId { get; set; }
+    [SugarColumn(Length = 64)]
+    public string FieldCode { get; set; } = string.Empty;
+    [SugarColumn(Length = 512)]
+    public string SourcePath { get; set; } = string.Empty;
+    [SugarColumn(Length = 128)]
+    public string DisplayName { get; set; } = string.Empty;
+    [SugarColumn(Length = 32)]
+    public string ValueType { get; set; } = "String";
+    [SugarColumn(Length = 32)]
+    public string FormatType { get; set; } = "Direct";
+    [SugarColumn(Length = 32, IsNullable = true)]
+    public string? Unit { get; set; }
+    [SugarColumn(IsNullable = true)]
+    public int? Decimals { get; set; }
+    [SugarColumn(ColumnDataType = "nvarchar(max)", IsNullable = true)]
+    public string? MappingJson { get; set; }
+    public int Sort { get; set; }
+    public bool Enabled { get; set; } = true;
+    public byte IsDelete { get; set; }
+    public DateTime CreateTime { get; set; } = DateTime.Now;
+    public DateTime UpdateTime { get; set; } = DateTime.Now;
+}
+
 /// <summary>把报文字段和值判断为运行、空闲或故障状态的规则。</summary>
 [SugarTable("EdgeDashboardRobotStateRule")]
 public class EdgeDashboardRobotStateRuleEntity

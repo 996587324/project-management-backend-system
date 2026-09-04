@@ -103,7 +103,8 @@ public class AgentService : IAgentService
     public async Task<AgentConversationDto> CreateConversationAsync(AgentStartRequest request)
     {
         var ownerUserId = RequireUserId(request.UserId);
-        var agentCode = AgentToolRegistryService.NormalizeAgentCode(request.AgentCode);
+        var interactionMode = NormalizeInteractionMode(request.Mode);
+        var agentCode = ResolveAgentCode(interactionMode, request.AgentCode);
         var agent = await _registry.GetAgentAsync(agentCode)
                     ?? throw new InvalidOperationException($"Agent {agentCode} 不存在或已禁用");
         var entity = new AgentConversationEntity
@@ -112,7 +113,7 @@ public class AgentService : IAgentService
             UserId = ownerUserId,
             Title = LimitText(string.IsNullOrWhiteSpace(request.Title) ? "Agent 会话" : request.Title.Trim(), 128),
             ScopeProjectName = EmptyToNull(request.ScopeProjectName),
-            Mode = string.IsNullOrWhiteSpace(request.Mode) ? "Online" : request.Mode.Trim(),
+            Mode = interactionMode,
             Status = "Active",
             CreateTime = DateTime.Now,
             UpdateTime = DateTime.Now
@@ -132,10 +133,13 @@ public class AgentService : IAgentService
         if (string.IsNullOrWhiteSpace(request.Message))
             throw new InvalidOperationException("消息不能为空");
 
+        var interactionMode = NormalizeInteractionMode(request.Mode);
+        request.Mode = interactionMode;
+        var agentCode = ResolveAgentCode(interactionMode, request.AgentCode);
+        request.AgentCode = agentCode;
         var modelUserMessage = BuildModelUserMessage(request);
         await ReportProgressAsync(progress, "preparing", "正在准备 Agent 会话");
-        var agentCode = AgentToolRegistryService.NormalizeAgentCode(request.AgentCode);
-        var isProjectCsv = agentCode == AgentCodes.ProjectManagement && IsProjectCsvRequest(request);
+        var isProjectCsv = interactionMode == "Work" && agentCode == AgentCodes.ProjectManagement && IsProjectCsvRequest(request);
         var agent = await _registry.GetAgentAsync(agentCode)
                     ?? throw new InvalidOperationException($"Agent {agentCode} 不存在或已禁用");
         var conversation = await GetOrCreateConversationAsync(request, agent.AgentCode);
@@ -149,6 +153,32 @@ public class AgentService : IAgentService
         {
             await ReportProgressAsync(progress, "saving_result", "执行完成，正在保存结果", conversation.Id);
             return confirmationResponse;
+        }
+
+        // 聊天模式从后端强制路由到无工具的 chat Agent，绝不读取工具目录、选择工具或执行操作。
+        if (interactionMode == "Chat")
+        {
+            await ReportProgressAsync(progress, "generating_reply", "正在生成聊天回复", conversation.Id);
+            var chatReply = await _modelClient.GenerateReplyAsync(new AgentModelRequest
+            {
+                AgentCode = agent.AgentCode,
+                UserId = request.UserId,
+                UserMessage = request.Message.Trim(),
+                SystemPrompt = agent.SystemPrompt,
+                History = history
+            });
+            var chatReplyText = chatReply.Success && !string.IsNullOrWhiteSpace(chatReply.Content)
+                ? chatReply.Content.Trim()
+                : chatReply.ErrorMessage ?? "暂时无法回答该问题";
+            await AddMessageAsync(conversation.Id, "assistant", chatReplyText);
+            await TouchConversationAsync(conversation.Id);
+            await ReportProgressAsync(progress, "saving_result", "回答已生成，正在保存会话", conversation.Id);
+            return new AgentResponseDto
+            {
+                ConversationId = conversation.Id,
+                Reply = chatReplyText,
+                Suggestions = await _registry.GetSuggestionsAsync(agent.AgentCode)
+            };
         }
 
         var tools = await _registry.GetEnabledToolsAsync(agent.AgentCode);
@@ -169,6 +199,7 @@ public class AgentService : IAgentService
         var selection = await _modelClient.SelectToolsAsync(new AgentToolSelectionRequest
         {
             AgentCode = agent.AgentCode,
+            UserId = request.UserId,
             SystemPrompt = agent.SystemPrompt ?? string.Empty,
             UserMessage = modelUserMessage,
             ScopeProjectName = request.ScopeProjectName ?? conversation.ScopeProjectName,
@@ -380,36 +411,50 @@ public class AgentService : IAgentService
     }
 
     /// <summary>
-    /// 当用户回复“确认”时，尝试找到最近一个待确认计划并执行。
+    /// 当用户回复“确认”时，执行待确认计划。
+    /// 生产看板的新增、编辑通常由多个连续工具调用组成，因此一次确认会按计划生成顺序执行全部待确认项。
     /// </summary>
     private async Task<AgentResponseDto?> TryConfirmFromConversationAsync(
         AgentConversationEntity conversation,
         AgentSendRequest request)
     {
-        if (!request.AutoExecute && !IsConfirmationMessage(request.Message)) return null;
-        var pending = await Db.Queryable<AgentExecutionPlanEntity>()
+        // 写操作只能由用户明确回复确认触发，不能由客户端传入的 AutoExecute 参数绕过。
+        if (!IsConfirmationMessage(request.Message)) return null;
+
+        var pendingPlans = await Db.Queryable<AgentExecutionPlanEntity>()
             .Where(x => x.ConversationId == conversation.Id && x.Status == "PendingConfirmation")
-            .OrderByDescending(x => x.CreateTime)
-            .OrderByDescending(x => x.Id)
-            .FirstAsync();
-        if (pending == null) return null;
+            .OrderBy(x => x.CreateTime)
+            .OrderBy(x => x.Id)
+            .ToListAsync();
+        if (!pendingPlans.Any()) return null;
 
-        var call = await _dispatcher.ConfirmAsync(new AgentConfirmRequest
+        // 保持其他 Agent 原有的“仅确认最近一项”行为，生产看板则一次执行同轮生成的完整配置计划。
+        if (!conversation.AgentCode.Equals(AgentCodes.ProductionDashboard, StringComparison.OrdinalIgnoreCase))
+            pendingPlans = new List<AgentExecutionPlanEntity> { pendingPlans[^1] };
+
+        var calls = new List<AgentToolCallDto>();
+        foreach (var pendingPlan in pendingPlans)
         {
-            ToolCallId = pending.Id,
-            UserId = request.UserId,
-            Remark = "conversation-confirm"
-        });
-        if (call == null) return null;
+            var call = await _dispatcher.ConfirmAsync(new AgentConfirmRequest
+            {
+                ToolCallId = pendingPlan.Id,
+                UserId = request.UserId,
+                Remark = "conversation-confirm"
+            });
+            if (call != null) calls.Add(call);
+        }
+        if (!calls.Any()) return null;
 
-        var reply = BuildExecutionReply(call);
+        var reply = calls.Count == 1
+            ? BuildExecutionReply(calls[0])
+            : $"已按确认执行 {calls.Count} 项看板配置：\n" + string.Join("\n", calls.Select(BuildExecutionReply));
         await AddMessageAsync(conversation.Id, "assistant", reply);
         await TouchConversationAsync(conversation.Id);
         return new AgentResponseDto
         {
             ConversationId = conversation.Id,
             Reply = reply,
-            ToolCalls = new List<AgentToolCallDto> { call },
+            ToolCalls = calls,
             RequiresConfirmation = false,
             Suggestions = await _registry.GetSuggestionsAsync(conversation.AgentCode)
         };
@@ -445,6 +490,8 @@ public class AgentService : IAgentService
             if (!string.IsNullOrWhiteSpace(selection.Content)) return selection.Content.Trim();
             var directReply = await _modelClient.GenerateReplyAsync(new AgentModelRequest
             {
+                AgentCode = agent.AgentCode,
+                UserId = request.UserId,
                 UserMessage = modelUserMessage,
                 SystemPrompt = agent.SystemPrompt,
                 ScopeProjectName = request.ScopeProjectName ?? conversation.ScopeProjectName,
@@ -455,6 +502,8 @@ public class AgentService : IAgentService
 
         var modelReply = await _modelClient.GenerateReplyAsync(new AgentModelRequest
         {
+            AgentCode = agent.AgentCode,
+            UserId = request.UserId,
             UserMessage = IsProjectCsvRequest(request)
                 ? $"{request.Message}\n请逐项列出 LLM 整理出的待写入项目，并明确说明当前仍需用户确认，尚未写入数据库。"
                 : request.Message,
@@ -525,7 +574,7 @@ public class AgentService : IAgentService
                 UserId = ownerUserId,
                 Title = LimitText(request.Message.Trim(), 28),
                 ScopeProjectName = EmptyToNull(request.ScopeProjectName),
-                Mode = string.IsNullOrWhiteSpace(request.Mode) ? "Online" : request.Mode.Trim(),
+                Mode = NormalizeInteractionMode(request.Mode),
                 Status = "Active",
                 CreateTime = DateTime.Now,
                 UpdateTime = DateTime.Now
@@ -536,8 +585,7 @@ public class AgentService : IAgentService
 
         if (!string.IsNullOrWhiteSpace(request.ScopeProjectName))
             conversation.ScopeProjectName = request.ScopeProjectName.Trim();
-        if (!string.IsNullOrWhiteSpace(request.Mode))
-            conversation.Mode = request.Mode.Trim();
+        conversation.Mode = NormalizeInteractionMode(request.Mode);
         conversation.UpdateTime = DateTime.Now;
         await Db.Updateable(conversation).ExecuteCommandAsync();
         return conversation;
@@ -623,6 +671,19 @@ public class AgentService : IAgentService
                normalized.Equals("同意执行", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("执行", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeInteractionMode(string? mode) =>
+        mode?.Trim().Equals("Chat", StringComparison.OrdinalIgnoreCase) == true ? "Chat" : "Work";
+
+    private static string ResolveAgentCode(string interactionMode, string? requestedAgentCode)
+    {
+        if (interactionMode == "Chat") return AgentCodes.Chat;
+
+        var agentCode = AgentToolRegistryService.NormalizeAgentCode(requestedAgentCode);
+        if (agentCode.Equals(AgentCodes.Chat, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("工作模式必须选择业务域");
+        return agentCode;
     }
 
     private static string LimitText(string value, int length) => value.Length <= length ? value : value[..length];

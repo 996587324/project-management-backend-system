@@ -26,6 +26,7 @@ public class EdgeGatewayService : IEdgeGatewayService
     private const string SpreadsheetContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
     private const int HeaderRowIndex = 2;
     private const int DataStartRowIndex = 3;
+    private const int WebSocketReceiveRecordRetentionDays = 7;
     private const string InstructionSheet = "使用说明";
     private const string ConnectionSheet = "连接配置";
     private const string CollectionSheet = "采集配置";
@@ -227,6 +228,7 @@ public class EdgeGatewayService : IEdgeGatewayService
     private readonly IEdgeGatewayFeatureService _featureService;
     private readonly IReadOnlyDictionary<string, IBSystemTransportSender> _bSystemTransportSenders;
     private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient WebSocketLogDb => _dbScope.GetConnectionScope("edge-gateway-logs");
 
     private sealed class EdgeImportRow
     {
@@ -853,6 +855,95 @@ public class EdgeGatewayService : IEdgeGatewayService
         };
     }
 
+    /// <summary>分页查询边缘节点向上游 WebSocket 发送订阅或请求报文的执行结果。</summary>
+    public async Task<EdgePagedResultDto<EdgeWebSocketSendRecordEntity>> GetWebSocketSendRecordPageAsync(
+        EdgeWebSocketSendRecordQueryDto query)
+    {
+        var page = Math.Max(query.Current, 1);
+        var size = Math.Clamp(query.Size, 1, 200);
+        RefAsync<int> total = 0;
+        var records = await Db.Queryable<EdgeWebSocketSendRecordEntity>()
+            .WhereIF(!string.IsNullOrWhiteSpace(query.DeviceCode), x => x.DeviceCode == query.DeviceCode)
+            .WhereIF(!string.IsNullOrWhiteSpace(query.SourceId), x => x.SourceId == query.SourceId)
+            .WhereIF(query.Success.HasValue, x => x.Success == query.Success!.Value)
+            .OrderByDescending(x => x.CreateTime)
+            .ToPageListAsync(page, size, total);
+        return new EdgePagedResultDto<EdgeWebSocketSendRecordEntity>
+        {
+            Records = records,
+            Current = page,
+            Size = size,
+            Total = total
+        };
+    }
+
+    /// <summary>保存边缘节点上报的 WebSocket 发送记录，限制常规字段长度以保护中心库。</summary>
+    public async Task<long> ReportWebSocketSendRecordAsync(EdgeWebSocketSendRecordReportDto dto)
+    {
+        if (string.IsNullOrWhiteSpace(dto.DeviceCode))
+            throw new InvalidOperationException("设备编码不能为空");
+        if (string.IsNullOrWhiteSpace(dto.SourceId))
+            throw new InvalidOperationException("数据源标识不能为空");
+        if (string.IsNullOrWhiteSpace(dto.Payload))
+            throw new InvalidOperationException("发送报文不能为空");
+
+        var entity = new EdgeWebSocketSendRecordEntity
+        {
+            DeviceCode = dto.DeviceCode.Trim(),
+            SourceId = dto.SourceId.Trim(),
+            SourceName = TrimToNull(dto.SourceName, 128),
+            Endpoint = TrimToNull(dto.Endpoint, 1024),
+            SendType = string.IsNullOrWhiteSpace(dto.SendType) ? "InitialSubscription" : dto.SendType.Trim()[..Math.Min(dto.SendType.Trim().Length, 32)],
+            Payload = dto.Payload,
+            Success = dto.Success,
+            ErrorMessage = TrimToNull(dto.ErrorMessage, 512),
+            DurationMs = Math.Max(dto.DurationMs, 0),
+            CreateTime = DateTime.Now
+        };
+        return await Db.Insertable(entity).ExecuteReturnIdentityAsync();
+    }
+
+    /// <summary>
+    /// 查询最近七个自然日的 WebSocket 接收记录。记录物理上按日表保存，按日期倒序逐表分页，
+    /// 避免将多天高频报文合并到一张大表再扫描。
+    /// </summary>
+    public async Task<EdgePagedResultDto<EdgeWebSocketReceiveRecordEntity>> GetWebSocketReceiveRecordPageAsync(
+        EdgeWebSocketReceiveRecordQueryDto query)
+    {
+        var page = Math.Max(query.Current, 1);
+        var size = Math.Clamp(query.Size, 1, 200);
+        var (startDate, endDate) = GetWebSocketReceiveRecordDateRange(query);
+        if (startDate > endDate)
+            return new EdgePagedResultDto<EdgeWebSocketReceiveRecordEntity>
+            {
+                Records = new(),
+                Current = page,
+                Size = size,
+                Total = 0
+            };
+
+        var recordQuery = WebSocketLogDb.Queryable<EdgeWebSocketReceiveRecordEntity>()
+            .SplitTable(startDate, endDate)
+            .WhereIF(!string.IsNullOrWhiteSpace(query.DeviceCode), x => x.DeviceCode == query.DeviceCode)
+            .WhereIF(!string.IsNullOrWhiteSpace(query.SourceId), x => x.SourceId == query.SourceId)
+            .WhereIF(!string.IsNullOrWhiteSpace(query.SourceDeviceCode), x => x.SourceDeviceCode == query.SourceDeviceCode)
+            .WhereIF(!string.IsNullOrWhiteSpace(query.DataType), x => x.DataType == query.DataType);
+        var total = await recordQuery.CountAsync();
+        var records = await recordQuery
+            .OrderByDescending(x => x.CreateTime)
+            .Skip((page - 1) * size)
+            .Take(size)
+            .ToListAsync();
+
+        return new EdgePagedResultDto<EdgeWebSocketReceiveRecordEntity>
+        {
+            Records = records,
+            Current = page,
+            Size = size,
+            Total = total
+        };
+    }
+
     /// <summary>接收边缘批量消息，以 MessageId 去重后写入中心 Pending 队列。</summary>
     public async Task<EdgeMessageAcceptResultDto> ReceiveMessagesAsync(EdgeMessageBatchDto dto)
     {
@@ -881,6 +972,7 @@ public class EdgeGatewayService : IEdgeGatewayService
             var queueEntity = _mapper.Map<EdgeMessageQueueEntity>(message);
             queueEntity.DeviceCode = deviceCode;
             await Db.Insertable(queueEntity).ExecuteCommandAsync();
+            await AddWebSocketReceiveRecordAsync(message, deviceCode);
             result.AcceptedCount++;
         }
         return result;
@@ -934,11 +1026,12 @@ public class EdgeGatewayService : IEdgeGatewayService
         await BForwardSemaphore.WaitAsync();
         try
         {
-            var records = await Db.Queryable<EdgeMessageQueueEntity>()
+            var db = Db;
+            var records = await db.Queryable<EdgeMessageQueueEntity>()
                 .WhereIF(dto.Ids.Count > 0, x => dto.Ids.Contains(x.Id))
                 .Where(x => x.Status == "Pending" || x.Status == "Failed")
                 .OrderBy(x => x.CreateTime).Take(100).ToListAsync();
-            return await ForwardRecordsAsync(records, CancellationToken.None);
+            return await ForwardRecordsAsync(db, records, CancellationToken.None);
         }
         finally
         {
@@ -955,14 +1048,15 @@ public class EdgeGatewayService : IEdgeGatewayService
         await BForwardSemaphore.WaitAsync(cancellationToken);
         try
         {
+            using var db = _dbScope.GetConnection("calmadmin").CopyNew();
             var now = DateTime.Now;
-            var records = await Db.Queryable<EdgeMessageQueueEntity>()
+            var records = await db.Queryable<EdgeMessageQueueEntity>()
                 .Where(x => (x.Status == "Pending" || x.Status == "Failed") &&
                             (x.NextRetryTime == null || x.NextRetryTime <= now))
                 .OrderBy(x => x.CreateTime)
                 .Take(Math.Clamp(limit, 1, 500))
                 .ToListAsync();
-            return await ForwardRecordsAsync(records, cancellationToken);
+            return await ForwardRecordsAsync(db, records, cancellationToken);
         }
         finally
         {
@@ -972,16 +1066,17 @@ public class EdgeGatewayService : IEdgeGatewayService
 
     /// <summary>使用当前有效映射逐条转发已经选出的中心队列记录。</summary>
     private async Task<EdgeRetryResultDto> ForwardRecordsAsync(
+        ISqlSugarClient db,
         IReadOnlyCollection<EdgeMessageQueueEntity> records,
         CancellationToken cancellationToken)
     {
         var result = new EdgeRetryResultDto { RequestedCount = records.Count };
         if (records.Count == 0) return result;
 
-        var mappings = await Db.Queryable<EdgeBMappingRuleEntity>()
+        var mappings = await db.Queryable<EdgeBMappingRuleEntity>()
             .Where(x => x.IsDelete == 0 && x.Enabled)
             .ToListAsync();
-        var devices = await Db.Queryable<EdgeDeviceEntity>().Where(x => x.IsDelete == 0).ToListAsync();
+        var devices = await db.Queryable<EdgeDeviceEntity>().Where(x => x.IsDelete == 0).ToListAsync();
         var deviceIdMap = devices.ToDictionary(x => x.DeviceCode, x => x.Id, StringComparer.OrdinalIgnoreCase);
         var relevantDeviceIds = records
             .Select(x => deviceIdMap.TryGetValue(x.DeviceCode, out var id) ? (int?)id : null)
@@ -991,13 +1086,13 @@ public class EdgeGatewayService : IEdgeGatewayService
             .ToList();
         var sources = relevantDeviceIds.Count == 0
             ? []
-            : await Db.Queryable<EdgeWebSocketSourceEntity>()
+            : await db.Queryable<EdgeWebSocketSourceEntity>()
                 .Where(x => x.IsDelete == 0 && relevantDeviceIds.Contains(x.DeviceId))
                 .ToListAsync();
         var sourcePrimaryKeys = sources.Select(x => x.Id).ToList();
         var subscriptionDevices = sourcePrimaryKeys.Count == 0
             ? []
-            : await Db.Queryable<EdgeWebSocketSubscriptionDeviceEntity>()
+            : await db.Queryable<EdgeWebSocketSubscriptionDeviceEntity>()
                 .Where(x => x.IsDelete == 0 && sourcePrimaryKeys.Contains(x.WebSocketSourceId))
                 .ToListAsync();
 
@@ -1020,6 +1115,7 @@ public class EdgeGatewayService : IEdgeGatewayService
                     ? record.SourceId
                     : $"{record.SourceId}/{record.SourceDeviceCode}";
                 await MarkForwardFailedAsync(
+                    db,
                     record,
                     null,
                     null,
@@ -1037,6 +1133,7 @@ public class EdgeGatewayService : IEdgeGatewayService
                 if (!transportResult.Success)
                 {
                     await MarkForwardFailedAsync(
+                        db,
                         record,
                         mapping,
                         transportResult.Target,
@@ -1051,8 +1148,9 @@ public class EdgeGatewayService : IEdgeGatewayService
                 record.Status = "Uploaded";
                 record.UploadTime = DateTime.Now;
                 record.LastError = null;
-                await Db.Updateable(record).ExecuteCommandAsync();
+                await db.Updateable(record).ExecuteCommandAsync();
                 await AddUploadRecordAsync(
+                    db,
                     record,
                     mapping,
                     transportResult.Target,
@@ -1067,6 +1165,7 @@ public class EdgeGatewayService : IEdgeGatewayService
             {
                 stopwatch.Stop();
                 await MarkForwardFailedAsync(
+                    db,
                     record,
                     mapping,
                     mapping.TargetUrl,
@@ -2404,6 +2503,47 @@ public class EdgeGatewayService : IEdgeGatewayService
             throw new InvalidOperationException("设备不存在");
     }
 
+    /// <summary>去除首尾空白、保留空值，并限制可索引文本字段的长度。</summary>
+    private static string? TrimToNull(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var trimmed = value.Trim();
+        return trimmed.Length > maxLength ? trimmed[..maxLength] : trimmed;
+    }
+
+    /// <summary>把一条已进入中心端队列的 WebSocket 原始报文写入当天的物理日表。</summary>
+    private async Task AddWebSocketReceiveRecordAsync(EdgeStandardMessageDto message, string deviceCode)
+    {
+        var now = DateTime.Now;
+        var record = new EdgeWebSocketReceiveRecordEntity
+        {
+            MessageId = message.MessageId.Trim(),
+            DeviceCode = deviceCode.Trim(),
+            SourceId = message.SourceId.Trim(),
+            SourceDeviceCode = TrimToNull(message.SourceDeviceCode, 128),
+            DataType = string.IsNullOrWhiteSpace(message.DataType) ? "Telemetry" : message.DataType.Trim()[..Math.Min(message.DataType.Trim().Length, 64)],
+            RawPayload = string.IsNullOrWhiteSpace(message.RawPayload) ? "{}" : message.RawPayload,
+            MessageTime = message.Timestamp,
+            CreateTime = now
+        };
+        record.Id = await WebSocketLogDb.Insertable(record)
+            .SplitTable()
+            .ExecuteReturnSnowflakeIdAsync();
+    }
+
+    /// <summary>日表查询日期最多覆盖今天及之前六日，严格限制在最近七个自然日。</summary>
+    private static (DateTime StartDate, DateTime EndDate) GetWebSocketReceiveRecordDateRange(
+        EdgeWebSocketReceiveRecordQueryDto query)
+    {
+        var today = DateTime.Today;
+        var oldestRetainedDate = today.AddDays(-(WebSocketReceiveRecordRetentionDays - 1));
+        var startDate = query.StartDate?.Date ?? oldestRetainedDate;
+        var endDate = query.EndDate?.Date ?? today;
+        if (startDate < oldestRetainedDate) startDate = oldestRetainedDate;
+        if (endDate > today) endDate = today;
+        return (startDate, endDate);
+    }
+
     /// <summary>写入一条中心端系统事件并返回主键。</summary>
     private async Task<long> AddEventAsync(string deviceCode, string level, string eventType, string message, string? detailJson)
     {
@@ -2431,6 +2571,7 @@ public class EdgeGatewayService : IEdgeGatewayService
 
     /// <summary>把中心队列记录标记为转发失败并保存失败原因。</summary>
     private async Task MarkForwardFailedAsync(
+        ISqlSugarClient db,
         EdgeMessageQueueEntity record,
         EdgeBMappingRuleEntity? mapping,
         string? targetUrl,
@@ -2443,8 +2584,9 @@ public class EdgeGatewayService : IEdgeGatewayService
         record.RetryCount++;
         record.LastError = error.Length > 500 ? error[..500] : error;
         record.NextRetryTime = DateTime.Now.AddSeconds(Math.Min(300, 5 * Math.Pow(2, Math.Min(record.RetryCount, 6))));
-        await Db.Updateable(record).ExecuteCommandAsync();
+        await db.Updateable(record).ExecuteCommandAsync();
         await AddUploadRecordAsync(
+            db,
             record,
             mapping,
             targetUrl,
@@ -2457,6 +2599,7 @@ public class EdgeGatewayService : IEdgeGatewayService
 
     /// <summary>记录一次中心端到 B 系统的协议转发尝试，并限制响应内容长度以控制日志表体积。</summary>
     private Task AddUploadRecordAsync(
+        ISqlSugarClient db,
         EdgeMessageQueueEntity record,
         EdgeBMappingRuleEntity? mapping,
         string? targetUrl,
@@ -2480,7 +2623,7 @@ public class EdgeGatewayService : IEdgeGatewayService
             : responseContent;
         uploadRecord.DurationMs = durationMs;
         uploadRecord.CreateTime = DateTime.Now;
-        return Db.Insertable(uploadRecord).ExecuteCommandAsync();
+        return db.Insertable(uploadRecord).ExecuteCommandAsync();
     }
 
     /// <summary>按协议选择内置 HTTP 发送或 IOC 注入的扩展协议发送器。</summary>

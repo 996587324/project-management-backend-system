@@ -192,15 +192,16 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
         if (!await ScheduledExportGate.WaitAsync(0, cancellationToken)) return 0;
         try
         {
+            using var db = _dbScope.GetConnection("calmadmin").CopyNew();
             var generatedCount = 0;
-            var settings = await Db.Queryable<EdgeDashboardExportSettingEntity>()
+            var settings = await db.Queryable<EdgeDashboardExportSettingEntity>()
                 .Where(x => x.Enabled)
                 .ToListAsync();
             foreach (var setting in settings)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!IsSettingDue(setting, now)) continue;
-                generatedCount += await RunSettingAsync(setting, now, cancellationToken);
+                generatedCount += await RunSettingAsync(db, setting, now, cancellationToken);
             }
             return generatedCount;
         }
@@ -212,12 +213,13 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
 
     /// <summary>顺序处理一个看板下的启用线体，失败记录五分钟后允许再次尝试。</summary>
     private async Task<int> RunSettingAsync(
+        ISqlSugarClient db,
         EdgeDashboardExportSettingEntity setting,
         DateTime now,
         CancellationToken cancellationToken)
     {
         var reportDate = now.Date.AddDays(-setting.ExportDayOffset);
-        var lines = await Db.Queryable<EdgeDashboardLineConfigEntity>()
+        var lines = await db.Queryable<EdgeDashboardLineConfigEntity>()
             .Where(x => x.DashboardCode == setting.DashboardCode &&
                         x.IsDelete == 0 && x.Enabled)
             .OrderBy(x => x.Sort)
@@ -227,7 +229,7 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
         foreach (var line in lines)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var existing = await Db.Queryable<EdgeDashboardExportRecordEntity>()
+            var existing = await db.Queryable<EdgeDashboardExportRecordEntity>()
                 .Where(x => x.DashboardCode == setting.DashboardCode &&
                             x.LineCode == line.LineCode &&
                             x.ReportDate == reportDate &&
@@ -255,9 +257,9 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
             record.ErrorMessage = null;
             record.UpdateTime = now;
             if (record.Id == 0)
-                record.Id = await Db.Insertable(record).ExecuteReturnBigIdentityAsync();
+                record.Id = await db.Insertable(record).ExecuteReturnBigIdentityAsync();
             else
-                await Db.Updateable(record).ExecuteCommandAsync();
+                await db.Updateable(record).ExecuteCommandAsync();
 
             try
             {
@@ -265,7 +267,8 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
                     setting.DashboardCode,
                     line.LineCode,
                     reportDate,
-                    cancellationToken);
+                    cancellationToken,
+                    db);
                 var relativePath = await WriteScheduledWorkbookAsync(
                     data,
                     record.FileName,
@@ -289,14 +292,14 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
                 record.UpdateTime = DateTime.Now;
                 allCompleted = false;
             }
-            await Db.Updateable(record).ExecuteCommandAsync();
+            await db.Updateable(record).ExecuteCommandAsync();
         }
 
         if (lines.Count == 0 || allCompleted)
         {
             setting.LastScheduledRunDate = now.Date;
             setting.UpdateTime = DateTime.Now;
-            await Db.Updateable(setting).ExecuteCommandAsync();
+            await db.Updateable(setting).ExecuteCommandAsync();
         }
         return generatedCount;
     }
@@ -306,24 +309,26 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
         string dashboardCode,
         string lineCode,
         DateTime reportDate,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ISqlSugarClient? db = null)
     {
+        db ??= Db;
         cancellationToken.ThrowIfCancellationRequested();
-        var line = await Db.Queryable<EdgeDashboardLineConfigEntity>()
+        var line = await db.Queryable<EdgeDashboardLineConfigEntity>()
             .FirstAsync(x => x.DashboardCode == dashboardCode &&
                              x.LineCode == lineCode && x.IsDelete == 0);
         if (line == null) throw new InvalidOperationException("线体配置不存在");
         var reportEnd = reportDate.AddDays(1);
-        var statistics = await Db.Queryable<EdgeDashboardRobotDailyStatisticEntity>()
+        var statistics = await db.Queryable<EdgeDashboardRobotDailyStatisticEntity>()
             .Where(x => x.LineCode == lineCode && x.StatDate == reportDate)
             .OrderBy(x => x.RobotCode)
             .ToListAsync();
-        var faults = await Db.Queryable<EdgeDashboardRobotFaultRecordEntity>()
+        var faults = await db.Queryable<EdgeDashboardRobotFaultRecordEntity>()
             .Where(x => x.LineCode == lineCode &&
                         x.StartTime >= reportDate && x.StartTime < reportEnd)
             .OrderByDescending(x => x.StartTime)
             .ToListAsync();
-        var configuredRobotCount = await Db.Queryable<EdgeDashboardRobotBindingEntity>()
+        var configuredRobotCount = await db.Queryable<EdgeDashboardRobotBindingEntity>()
             .CountAsync(x => x.DashboardCode == dashboardCode && x.LineCode == lineCode &&
                              x.IsDelete == 0 && x.Enabled);
         return new EdgeDashboardWorkbookData

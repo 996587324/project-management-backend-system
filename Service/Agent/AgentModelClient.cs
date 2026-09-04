@@ -1,10 +1,12 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Interface;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using Model.Agent;
 
 namespace Service;
@@ -15,9 +17,9 @@ namespace Service;
 public class AgentModelClient : IAgentModelClient
 {
     private readonly HttpClient _httpClient;
-    private readonly AgentOptions _options;
-    private const string OpenAiDefaultBaseUrl = "https://api.openai.com/v1";
-    private const string OpenAiDefaultModel = "gpt-4o-mini";
+    private readonly IAgentModelConfigurationResolver _configurationResolver;
+    private readonly IAgentModelInvocationLogService _invocationLogService;
+    private readonly ILogger<AgentModelClient> _logger;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -37,10 +39,16 @@ public class AgentModelClient : IAgentModelClient
         @"<DSML_parameter\b(?<attributes>[^>]*)>(?<value>.*?)</DSML_parameter\s*>",
         RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
 
-    public AgentModelClient(HttpClient httpClient, IOptions<AgentOptions> options)
+    public AgentModelClient(
+        HttpClient httpClient,
+        IAgentModelConfigurationResolver configurationResolver,
+        IAgentModelInvocationLogService invocationLogService,
+        ILogger<AgentModelClient> logger)
     {
         _httpClient = httpClient;
-        _options = options.Value;
+        _configurationResolver = configurationResolver;
+        _invocationLogService = invocationLogService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -50,83 +58,114 @@ public class AgentModelClient : IAgentModelClient
         AgentToolSelectionRequest request,
         CancellationToken cancellationToken = default)
     {
-        var runtime = ResolveRuntimeOptions();
-        var validationError = ValidateConfiguration(runtime);
-        if (!string.IsNullOrWhiteSpace(validationError))
-            return SelectionFailed(validationError, runtime);
+        var candidates = await _configurationResolver.ResolveCandidatesAsync(
+            request.AgentCode,
+            request.UserId,
+            cancellationToken);
+        if (candidates.Count == 0)
+            return SelectionFailed("没有可用的模型平台配置，请联系管理员在 Agent 中心启用 Turing 或 DeepSeek 并完成绑定",
+                EmptyRuntime(request.AgentCode));
 
-        try
+        AgentToolSelectionReply? lastFailure = null;
+        foreach (var runtime in candidates)
         {
-            var toolNameMap = BuildToolNameMap(request.Tools);
-            var tools = request.Tools.Select(x => new
+            var validationError = ValidateConfiguration(runtime);
+            if (!string.IsNullOrWhiteSpace(validationError))
             {
-                type = "function",
-                function = new
-                {
-                    name = ToFunctionName(x.Name),
-                    description = BuildToolDescription(x),
-                    parameters = ParseJsonOrEmptyObject(x.InputSchema)
-                }
-            }).ToList();
-
-            var payload = new
-            {
-                model = runtime.Model,
-                temperature = runtime.Temperature,
-                max_tokens = request.MaxOutputTokens.HasValue
-                    ? Math.Clamp(Math.Max(runtime.MaxTokens, request.MaxOutputTokens.Value), 1, 8192)
-                    : runtime.MaxTokens,
-                messages = BuildSelectionMessages(request, runtime),
-                tools,
-                tool_choice = "auto"
-            };
-
-            var responseText = await SendAsync(payload, runtime, cancellationToken);
-            using var document = JsonDocument.Parse(responseText);
-            var message = GetFirstMessage(document.RootElement);
-            if (message.ValueKind != JsonValueKind.Object)
-                return SelectionFailed("联网模型未返回有效消息", runtime);
-
-            var rawContent = ReadString(message, "content");
-            var reply = new AgentToolSelectionReply
-            {
-                Success = true,
-                Content = StripDsmlToolCalls(rawContent),
-                Provider = runtime.Provider,
-                Model = runtime.Model
-            };
-
-            if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var toolCall in toolCalls.EnumerateArray().Take(Math.Clamp(request.MaxToolCalls, 1, 8)))
-                {
-                    if (!toolCall.TryGetProperty("function", out var function)) continue;
-                    AddSelectedTool(reply, toolNameMap, ReadString(toolCall, "id"), function);
-                }
-            }
-            else if (message.TryGetProperty("function_call", out var functionCall) &&
-                     functionCall.ValueKind == JsonValueKind.Object)
-            {
-                AddSelectedTool(reply, toolNameMap, Guid.NewGuid().ToString("N"), functionCall);
+                lastFailure = SelectionFailed(validationError, runtime);
+                continue;
             }
 
-            if (!reply.ToolCalls.Any() && !string.IsNullOrWhiteSpace(rawContent))
-                AddDsmlSelectedTools(
-                    reply,
-                    toolNameMap,
-                    rawContent,
-                    Math.Clamp(request.MaxToolCalls, 1, 8));
+            try
+            {
+                var reply = await SelectToolsWithRuntimeAsync(request, runtime, cancellationToken);
+                if (reply.Success) return reply;
+                lastFailure = reply;
+            }
+            catch (AgentModelTransportException ex)
+            {
+                lastFailure = SelectionFailed(ex.Message, runtime);
+                if (ex.CanFallback)
+                    _logger.LogWarning("Agent 模型平台 {Provider} 工具选择失败，尝试下一候选平台。{Message}",
+                        runtime.Provider, ex.Message);
+                if (!ex.CanFallback) return lastFailure;
+            }
+            catch (Exception ex)
+            {
+                lastFailure = SelectionFailed($"模型工具选择失败：{ex.Message}", runtime);
+            }
+        }
 
-            return reply;
-        }
-        catch (HttpRequestException ex)
+        return lastFailure ?? SelectionFailed("没有可用的模型平台", EmptyRuntime(request.AgentCode));
+    }
+
+    /// <summary>使用单个平台完成工具选择，外层负责按绑定优先级进行平台回退。</summary>
+    private async Task<AgentToolSelectionReply> SelectToolsWithRuntimeAsync(
+        AgentToolSelectionRequest request,
+        RuntimeAgentOptions runtime,
+        CancellationToken cancellationToken)
+    {
+        var toolNameMap = BuildToolNameMap(request.Tools);
+        var tools = request.Tools.Select(x => new
         {
-            return SelectionFailed(ex.Message, runtime);
-        }
-        catch (Exception ex)
+            type = "function",
+            function = new
+            {
+                name = ToFunctionName(x.Name),
+                description = BuildToolDescription(x),
+                parameters = ParseJsonOrEmptyObject(x.InputSchema)
+            }
+        }).ToList();
+
+        var payload = new
         {
-            return SelectionFailed($"模型工具选择失败：{ex.Message}", runtime);
+            model = runtime.Model,
+            temperature = runtime.Temperature,
+            max_tokens = request.MaxOutputTokens.HasValue
+                ? Math.Clamp(Math.Max(runtime.MaxTokens, request.MaxOutputTokens.Value), 1, 8192)
+                : runtime.MaxTokens,
+            messages = BuildSelectionMessages(request, runtime),
+            tools,
+            tool_choice = "auto"
+        };
+
+        var transport = await SendAsync(payload, runtime, "ToolSelection", cancellationToken);
+        using var document = JsonDocument.Parse(transport.Content);
+        var message = GetFirstMessage(document.RootElement);
+        if (message.ValueKind != JsonValueKind.Object)
+            return SelectionFailed("联网模型未返回有效消息", runtime);
+
+        var rawContent = ReadString(message, "content");
+        var reply = new AgentToolSelectionReply
+        {
+            Success = true,
+            Content = StripDsmlToolCalls(rawContent),
+            Provider = runtime.Provider,
+            Model = runtime.Model
+        };
+
+        if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var toolCall in toolCalls.EnumerateArray().Take(Math.Clamp(request.MaxToolCalls, 1, 8)))
+            {
+                if (!toolCall.TryGetProperty("function", out var function)) continue;
+                AddSelectedTool(reply, toolNameMap, ReadString(toolCall, "id"), function);
+            }
         }
+        else if (message.TryGetProperty("function_call", out var functionCall) &&
+                 functionCall.ValueKind == JsonValueKind.Object)
+        {
+            AddSelectedTool(reply, toolNameMap, Guid.NewGuid().ToString("N"), functionCall);
+        }
+
+        if (!reply.ToolCalls.Any() && !string.IsNullOrWhiteSpace(rawContent))
+            AddDsmlSelectedTools(
+                reply,
+                toolNameMap,
+                rawContent,
+                Math.Clamp(request.MaxToolCalls, 1, 8));
+
+        return reply;
     }
 
     /// <summary>
@@ -136,50 +175,149 @@ public class AgentModelClient : IAgentModelClient
         AgentModelRequest request,
         CancellationToken cancellationToken = default)
     {
-        var runtime = ResolveRuntimeOptions();
+        var candidates = await _configurationResolver.ResolveCandidatesAsync(
+            request.AgentCode,
+            request.UserId,
+            cancellationToken);
+        if (candidates.Count == 0)
+            return Failed("没有可用的模型平台配置，请联系管理员在 Agent 中心启用 Turing 或 DeepSeek 并完成绑定",
+                EmptyRuntime(request.AgentCode));
+
+        AgentModelReply? lastFailure = null;
+        foreach (var runtime in candidates)
+        {
+            var validationError = ValidateConfiguration(runtime);
+            if (!string.IsNullOrWhiteSpace(validationError))
+            {
+                lastFailure = Failed(validationError, runtime);
+                continue;
+            }
+
+            try
+            {
+                var reply = await GenerateReplyWithRuntimeAsync(request, runtime, cancellationToken);
+                if (reply.Success) return reply;
+                lastFailure = reply;
+            }
+            catch (AgentModelTransportException ex)
+            {
+                lastFailure = Failed(ex.Message, runtime);
+                if (ex.CanFallback)
+                    _logger.LogWarning("Agent 模型平台 {Provider} 回复生成失败，尝试下一候选平台。{Message}",
+                        runtime.Provider, ex.Message);
+                if (!ex.CanFallback) return lastFailure;
+            }
+            catch (Exception ex)
+            {
+                lastFailure = Failed($"联网模型调用异常：{ex.Message}", runtime);
+            }
+        }
+
+        return lastFailure ?? Failed("没有可用的模型平台", EmptyRuntime(request.AgentCode));
+    }
+
+    /// <summary>使用单个平台生成回复，外层负责按绑定优先级进行平台回退。</summary>
+    private async Task<AgentModelReply> GenerateReplyWithRuntimeAsync(
+        AgentModelRequest request,
+        RuntimeAgentOptions runtime,
+        CancellationToken cancellationToken)
+    {
+        var payload = new
+        {
+            model = runtime.Model,
+            temperature = runtime.Temperature,
+            max_tokens = runtime.MaxTokens,
+            messages = BuildReplyMessages(request, runtime)
+        };
+        var transport = await SendAsync(payload, runtime, "GenerateReply", cancellationToken);
+        var content = StripDsmlToolCalls(ExtractContent(transport.Content));
+        return string.IsNullOrWhiteSpace(content)
+            ? Failed("联网模型返回为空", runtime)
+            : new AgentModelReply
+            {
+                Success = true,
+                Content = content.Trim(),
+                Provider = runtime.Provider,
+                Model = runtime.Model
+            };
+    }
+
+    /// <summary>对已保存的平台发送最小请求，验证地址、密钥和模型编码。</summary>
+    public async Task<AgentModelProviderTestResultDto> TestConnectionAsync(
+        int providerId,
+        string ownerUserId,
+        CancellationToken cancellationToken = default)
+    {
+        var runtime = await _configurationResolver.ResolveProviderAsync(
+            providerId,
+            ownerUserId,
+            "connection-test",
+            cancellationToken);
+        if (runtime == null)
+            return new AgentModelProviderTestResultDto { Message = "平台不存在、未配置密钥或密钥无法解密" };
+
         var validationError = ValidateConfiguration(runtime);
         if (!string.IsNullOrWhiteSpace(validationError))
-            return Failed(validationError, runtime);
+            return new AgentModelProviderTestResultDto
+            {
+                ProviderCode = runtime.Provider,
+                Model = runtime.Model,
+                Message = validationError
+            };
 
         try
         {
             var payload = new
             {
                 model = runtime.Model,
-                temperature = runtime.Temperature,
-                max_tokens = runtime.MaxTokens,
-                messages = BuildReplyMessages(request, runtime)
+                temperature = 0,
+                max_tokens = 8,
+                messages = new[] { new { role = "user", content = "只回复 OK" } }
             };
-            var responseText = await SendAsync(payload, runtime, cancellationToken);
-            var content = StripDsmlToolCalls(ExtractContent(responseText));
-            return string.IsNullOrWhiteSpace(content)
-                ? Failed("联网模型返回为空", runtime)
-                : new AgentModelReply
-                {
-                    Success = true,
-                    Content = content.Trim(),
-                    Provider = runtime.Provider,
-                    Model = runtime.Model
-                };
-        }
-        catch (HttpRequestException ex)
-        {
-            return Failed(ex.Message, runtime);
+            var transport = await SendAsync(payload, runtime, "ConnectionTest", cancellationToken);
+            return new AgentModelProviderTestResultDto
+            {
+                Success = true,
+                Message = "连接成功",
+                ProviderCode = runtime.Provider,
+                Model = runtime.Model,
+                TraceId = transport.TraceId,
+                DurationMs = transport.DurationMs
+            };
         }
         catch (Exception ex)
         {
-            return Failed($"联网模型调用异常：{ex.Message}", runtime);
+            return new AgentModelProviderTestResultDto
+            {
+                Success = false,
+                Message = ex.Message,
+                ProviderCode = runtime.Provider,
+                Model = runtime.Model
+            };
         }
     }
 
     /// <summary>
-    /// 发送 HTTP 请求到模型服务，并返回原始响应文本。
+    /// 发送模型请求，追加 Turing 扩展参数，并记录不含提示词正文的调用观测信息。
     /// </summary>
-    private async Task<string> SendAsync(object payload, RuntimeAgentOptions runtime, CancellationToken cancellationToken)
+    private async Task<AgentModelTransportResponse> SendAsync(
+        object payload,
+        RuntimeAgentOptions runtime,
+        string stage,
+        CancellationToken cancellationToken)
     {
+        var clientRequestId = Guid.NewGuid().ToString("N");
+        var stopwatch = Stopwatch.StartNew();
         using var request = new HttpRequestMessage(HttpMethod.Post, BuildEndpoint(runtime));
         ApplyApiKey(request, runtime);
-        request.Content = new StringContent(JsonSerializer.Serialize(payload, JsonOptions), Encoding.UTF8, "application/json");
+        request.Headers.TryAddWithoutValidation("X-Client-Request-Id", clientRequestId);
+        if (IsTuring(runtime))
+        {
+            request.Headers.TryAddWithoutValidation(
+                "X-Turing-Tags",
+                JsonSerializer.Serialize(new { application = "calmadmin", agent = runtime.AgentCode, stage }));
+        }
+        request.Content = new StringContent(SerializePayload(payload, runtime), Encoding.UTF8, "application/json");
 
         using var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCancellation.CancelAfter(TimeSpan.FromSeconds(Math.Max(runtime.TimeoutSeconds, 10)));
@@ -187,13 +325,52 @@ public class AgentModelClient : IAgentModelClient
         {
             using var response = await _httpClient.SendAsync(request, timeoutCancellation.Token);
             var responseText = await response.Content.ReadAsStringAsync(timeoutCancellation.Token);
+            stopwatch.Stop();
+            var traceId = ReadHeader(response, "X-Turing-Trace-Id");
+            var actualModel = ReadHeader(response, "x-turing-model-id");
+            var retryCount = ReadIntHeader(response, "x-turing-retries");
+            var fallbackCount = ReadIntHeader(response, "x-turing-fallbacks");
+
             if (!response.IsSuccessStatusCode)
-                throw new HttpRequestException($"联网模型调用失败：HTTP {(int)response.StatusCode}，{responseText}");
-            return responseText;
+            {
+                var error = ParseBusinessError(responseText);
+                traceId ??= error.TraceId;
+                await RecordInvocationAsync(runtime, stage, clientRequestId, stopwatch.ElapsedMilliseconds,
+                    false, (int)response.StatusCode, error.Code, error.Message, traceId, actualModel,
+                    retryCount, fallbackCount);
+                var message = string.IsNullOrWhiteSpace(error.Message)
+                    ? $"联网模型调用失败：HTTP {(int)response.StatusCode}"
+                    : $"联网模型调用失败：HTTP {(int)response.StatusCode}，code={error.Code?.ToString() ?? "-"}，{error.Message}";
+                throw new AgentModelTransportException(
+                    message,
+                    CanFallback(response.StatusCode),
+                    response.StatusCode);
+            }
+
+            var usage = ParseUsage(responseText);
+            await RecordInvocationAsync(runtime, stage, clientRequestId, stopwatch.ElapsedMilliseconds,
+                true, (int)response.StatusCode, null, null, traceId, actualModel,
+                retryCount, fallbackCount, usage);
+            return new AgentModelTransportResponse(responseText, traceId, stopwatch.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new TimeoutException($"联网模型调用超过 {Math.Max(runtime.TimeoutSeconds, 10)} 秒未完成");
+            stopwatch.Stop();
+            var message = $"联网模型调用超过 {Math.Max(runtime.TimeoutSeconds, 10)} 秒未完成";
+            await RecordInvocationAsync(runtime, stage, clientRequestId, stopwatch.ElapsedMilliseconds,
+                false, null, null, message, null, null, 0, 0);
+            throw new AgentModelTransportException(message, true, null);
+        }
+        catch (AgentModelTransportException)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            stopwatch.Stop();
+            await RecordInvocationAsync(runtime, stage, clientRequestId, stopwatch.ElapsedMilliseconds,
+                false, null, null, ex.Message, null, null, 0, 0);
+            throw new AgentModelTransportException($"联网模型网络请求失败：{ex.Message}", true, ex.StatusCode, ex);
         }
     }
 
@@ -280,52 +457,176 @@ public class AgentModelClient : IAgentModelClient
     }
 
     /// <summary>
-    /// 合并配置文件和默认值，生成本次调用使用的最终模型配置。
+    /// 校验数据库模型平台是否具备完整调用参数。
     /// </summary>
-    private RuntimeAgentOptions ResolveRuntimeOptions()
+    private static string? ValidateConfiguration(RuntimeAgentOptions runtime)
     {
-        var provider = string.IsNullOrWhiteSpace(_options.Provider) ? "OpenAICompatible" : _options.Provider.Trim();
-        var baseUrl = _options.BaseUrl;
-        var model = _options.Model;
-
-        if (IsDefaultBaseUrl(baseUrl))
-        {
-            if (IsDeepSeek(provider)) baseUrl = "https://api.deepseek.com";
-            else if (IsQwen(provider)) baseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-        }
-
-        if (IsDefaultModel(model))
-        {
-            if (IsDeepSeek(provider)) model = "deepseek-chat";
-            else if (IsQwen(provider)) model = "qwen-plus";
-        }
-
-        return new RuntimeAgentOptions
-        {
-            Provider = provider,
-            BaseUrl = baseUrl,
-            EndpointPath = string.IsNullOrWhiteSpace(_options.EndpointPath) ? "/chat/completions" : _options.EndpointPath,
-            ApiKey = _options.ApiKey,
-            ApiKeyHeader = string.IsNullOrWhiteSpace(_options.ApiKeyHeader) ? "Authorization" : _options.ApiKeyHeader,
-            Model = model,
-            Temperature = _options.Temperature,
-            MaxTokens = _options.MaxTokens,
-            TimeoutSeconds = _options.TimeoutSeconds,
-            SystemPrompt = _options.SystemPrompt
-        };
-    }
-
-    /// <summary>
-    /// 校验模型服务配置是否完整，例如是否开启、是否配置 ApiKey。
-    /// </summary>
-    private string? ValidateConfiguration(RuntimeAgentOptions runtime)
-    {
-        if (!_options.Enabled) return "联网模型未启用，请先配置 AgentOptions:Enabled";
-        if (string.IsNullOrWhiteSpace(runtime.ApiKey)) return "联网模型 ApiKey 未配置，请先配置 AgentOptions:ApiKey";
+        if (string.IsNullOrWhiteSpace(runtime.Provider)) return "模型平台编码未配置";
+        if (string.IsNullOrWhiteSpace(runtime.ApiKey)) return $"模型平台 {runtime.Provider} 未配置 ApiKey";
         if (string.IsNullOrWhiteSpace(runtime.BaseUrl)) return "联网模型 BaseUrl 未配置";
         if (string.IsNullOrWhiteSpace(runtime.Model)) return "联网模型 Model 未配置";
         return null;
     }
+
+    /// <summary>仅对 Turing 平台追加服务端超时、重试和模型 Fallback 配置。</summary>
+    private static string SerializePayload(object payload, RuntimeAgentOptions runtime)
+    {
+        var root = JsonSerializer.SerializeToNode(payload, JsonOptions) as JsonObject
+                   ?? throw new InvalidOperationException("模型请求无法序列化为 JSON 对象");
+        if (!IsTuring(runtime)) return root.ToJsonString(JsonOptions);
+
+        var turingOptions = new JsonObject
+        {
+            ["timeout"] = Math.Clamp(runtime.PlatformTimeoutSeconds, 1, 600),
+            ["max_retries"] = Math.Clamp(runtime.MaxRetries, 0, 5)
+        };
+        if (!string.IsNullOrWhiteSpace(runtime.FallbacksJson))
+        {
+            try
+            {
+                turingOptions["fallbacks"] = JsonNode.Parse(runtime.FallbacksJson);
+            }
+            catch (JsonException)
+            {
+                // 保存配置时已经校验；旧数据异常时忽略 Fallback，避免阻断主模型调用。
+            }
+        }
+        root["turing_options"] = turingOptions;
+        return root.ToJsonString(JsonOptions);
+    }
+
+    /// <summary>写入平台调用状态、追踪信息和 Token 用量，不保存请求与响应正文。</summary>
+    private Task RecordInvocationAsync(
+        RuntimeAgentOptions runtime,
+        string stage,
+        string clientRequestId,
+        long durationMs,
+        bool success,
+        int? statusCode,
+        int? businessCode,
+        string? errorMessage,
+        string? traceId,
+        string? actualModel,
+        int retryCount,
+        int fallbackCount,
+        AgentModelUsage? usage = null)
+    {
+        return _invocationLogService.RecordAsync(new AgentModelInvocationLogWriteDto
+        {
+            OwnerUserId = runtime.OwnerUserId,
+            AgentCode = runtime.AgentCode,
+            ProviderId = runtime.ProviderId,
+            ProviderCode = runtime.Provider,
+            Stage = stage,
+            Model = runtime.Model,
+            Success = success,
+            StatusCode = statusCode,
+            BusinessCode = businessCode,
+            ErrorMessage = Truncate(errorMessage, 1000),
+            TraceId = traceId,
+            ActualModel = actualModel,
+            RetryCount = retryCount,
+            FallbackCount = fallbackCount,
+            DurationMs = durationMs,
+            PromptTokens = usage?.PromptTokens,
+            CompletionTokens = usage?.CompletionTokens,
+            TotalTokens = usage?.TotalTokens,
+            ClientRequestId = clientRequestId
+        }, CancellationToken.None);
+    }
+
+    private static AgentModelBusinessError ParseBusinessError(string responseText)
+    {
+        if (string.IsNullOrWhiteSpace(responseText)) return new AgentModelBusinessError(null, null, null);
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            var root = document.RootElement;
+            int? code = TryGetPropertyIgnoreCase(root, "code", out var codeElement) &&
+                        int.TryParse(codeElement.ToString(), out var parsedCode)
+                ? parsedCode
+                : null;
+            var message = TryGetPropertyIgnoreCase(root, "message", out var messageElement)
+                ? messageElement.ToString()
+                : null;
+            string? traceId = null;
+            if (TryGetPropertyIgnoreCase(root, "data", out var dataElement) &&
+                dataElement.ValueKind == JsonValueKind.Object &&
+                TryGetPropertyIgnoreCase(dataElement, "trace_id", out var traceElement))
+                traceId = traceElement.ToString();
+            return new AgentModelBusinessError(code, message, traceId);
+        }
+        catch (JsonException)
+        {
+            return new AgentModelBusinessError(null, Truncate(responseText, 500), null);
+        }
+    }
+
+    private static AgentModelUsage? ParseUsage(string responseText)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            if (!TryGetPropertyIgnoreCase(document.RootElement, "usage", out var usage) ||
+                usage.ValueKind != JsonValueKind.Object)
+                return null;
+            return new AgentModelUsage(
+                ReadNullableInt(usage, "prompt_tokens"),
+                ReadNullableInt(usage, "completion_tokens"),
+                ReadNullableInt(usage, "total_tokens"));
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) continue;
+                value = property.Value;
+                return true;
+            }
+        }
+        value = default;
+        return false;
+    }
+
+    private static int? ReadNullableInt(JsonElement element, string name) =>
+        TryGetPropertyIgnoreCase(element, name, out var value) && value.TryGetInt32(out var number)
+            ? number
+            : null;
+
+    private static string? ReadHeader(HttpResponseMessage response, string name) =>
+        response.Headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;
+
+    private static int ReadIntHeader(HttpResponseMessage response, string name) =>
+        int.TryParse(ReadHeader(response, name), out var value) ? value : 0;
+
+    private static bool CanFallback(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout ||
+        (int)statusCode == 429 ||
+        (int)statusCode >= 500;
+
+    private static bool IsTuring(RuntimeAgentOptions runtime)
+    {
+        if (runtime.Provider.StartsWith("turing", StringComparison.OrdinalIgnoreCase)) return true;
+        return Uri.TryCreate(runtime.BaseUrl, UriKind.Absolute, out var uri) &&
+               uri.Host.Equals("live-turing.cn.llm.tcljd.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? Truncate(string? value, int maxLength) =>
+        string.IsNullOrEmpty(value) || value.Length <= maxLength ? value : value[..maxLength];
+
+    private static RuntimeAgentOptions EmptyRuntime(string agentCode) => new()
+    {
+        AgentCode = AgentToolRegistryService.NormalizeAgentCode(agentCode),
+        Provider = "Unavailable"
+    };
 
     private static void AddSelectedTool(
         AgentToolSelectionReply reply,
@@ -520,21 +821,6 @@ public class AgentModelClient : IAgentModelClient
 
     private static string ToFunctionName(string toolName) => toolName.Replace(".", "__", StringComparison.Ordinal);
 
-    private static bool IsDefaultBaseUrl(string? baseUrl) =>
-        string.IsNullOrWhiteSpace(baseUrl) || baseUrl.TrimEnd('/').Equals(OpenAiDefaultBaseUrl, StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsDefaultModel(string? model) =>
-        string.IsNullOrWhiteSpace(model) || model.Equals(OpenAiDefaultModel, StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsDeepSeek(string provider) => provider.Equals("DeepSeek", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsQwen(string provider) =>
-        provider.Equals("Qwen", StringComparison.OrdinalIgnoreCase) ||
-        provider.Equals("DashScope", StringComparison.OrdinalIgnoreCase) ||
-        provider.Equals("Tongyi", StringComparison.OrdinalIgnoreCase) ||
-        provider.Equals("千问", StringComparison.OrdinalIgnoreCase) ||
-        provider.Equals("通义千问", StringComparison.OrdinalIgnoreCase);
-
     private static Uri BuildEndpoint(RuntimeAgentOptions options)
     {
         var baseUrl = options.BaseUrl.TrimEnd('/') + "/";
@@ -567,5 +853,24 @@ public class AgentModelClient : IAgentModelClient
         Model = options.Model,
         ErrorMessage = message
     };
+
+    private sealed record AgentModelTransportResponse(string Content, string? TraceId, long DurationMs);
+    private sealed record AgentModelBusinessError(int? Code, string? Message, string? TraceId);
+    private sealed record AgentModelUsage(int? PromptTokens, int? CompletionTokens, int? TotalTokens);
+
+    private sealed class AgentModelTransportException : HttpRequestException
+    {
+        public bool CanFallback { get; }
+
+        public AgentModelTransportException(
+            string message,
+            bool canFallback,
+            HttpStatusCode? statusCode,
+            Exception? innerException = null)
+            : base(message, innerException, statusCode)
+        {
+            CanFallback = canFallback;
+        }
+    }
 
 }

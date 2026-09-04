@@ -28,4 +28,8 @@ public interface ICenterApiClient
     /// </summary>
     Task ReportEventAsync(string level, string eventType, string message, object? detail,
         CancellationToken cancellationToken);
+
+    /// <summary>上报一次向上游 WebSocket 发送订阅或请求报文的结果。</summary>
+    Task ReportWebSocketSendRecordAsync(EdgeWebSocketSendRecordReportDto record,
+        CancellationToken cancellationToken);
 }

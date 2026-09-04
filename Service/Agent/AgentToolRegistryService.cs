@@ -68,10 +68,7 @@ public class AgentToolRegistryService : IAgentToolRegistryService
             await BackfillLegacyAgentUserIdsAsync();
             await SyncAgentDefinitionAsync(module.Module, normalizedCode);
 
-            var actionTools = _toolActions
-                .Select(x => x.Definition)
-                .Where(x => NormalizeAgentCode(x.AgentCode) == normalizedCode);
-            var toolSeeds = module.Tools.Concat(actionTools).ToList();
+            var toolSeeds = BuildToolSeeds(module, normalizedCode);
             var duplicateTool = toolSeeds
                 .GroupBy(x => x.ToolName, StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault(x => x.Count() > 1);
@@ -87,6 +84,49 @@ public class AgentToolRegistryService : IAgentToolRegistryService
         {
             InitializeLock.Release();
         }
+    }
+
+    /// <summary>
+    /// 全局查询助手自动聚合所有模块已注册的只读工具；复制工具元数据但保留原业务服务与权限，
+    /// 调度时仍会复用相同的业务查询动作。
+    /// </summary>
+    private List<AgentToolSeed> BuildToolSeeds(IAgentModuleProvider module, string normalizedCode)
+    {
+        if (!normalizedCode.Equals(AgentCodes.QueryAssistant, StringComparison.OrdinalIgnoreCase))
+        {
+            var actionTools = _toolActions
+                .Select(x => x.Definition)
+                .Where(x => NormalizeAgentCode(x.AgentCode) == normalizedCode);
+            return module.Tools.Concat(actionTools).ToList();
+        }
+
+        var sourceTools = _modules
+            .Where(x => !x.Key.Equals(AgentCodes.QueryAssistant, StringComparison.OrdinalIgnoreCase))
+            .SelectMany(x => x.Value.Tools)
+            .Concat(_toolActions.Select(x => x.Definition))
+            .Where(x => !x.IsWriteAction);
+
+        return sourceTools.Select(tool => new AgentToolSeed
+        {
+            AgentCode = AgentCodes.QueryAssistant,
+            ToolName = tool.ToolName,
+            Title = tool.Title,
+            Description = tool.Description,
+            Method = tool.Method,
+            Route = tool.Route,
+            InputSchema = tool.InputSchema,
+            OutputSchema = tool.OutputSchema,
+            IsWriteAction = false,
+            RequiresConfirmation = false,
+            Enabled = tool.Enabled,
+            PermissionKey = tool.PermissionKey,
+            RiskLevel = tool.RiskLevel,
+            ServiceName = tool.ServiceName,
+            ActionName = tool.ActionName,
+            Examples = tool.Examples,
+            Version = tool.Version,
+            Sort = tool.Sort
+        }).ToList();
     }
 
     /// <summary>新增或更新 Agent 定义，同时保留管理员在数据库设置的启停状态。</summary>
@@ -189,6 +229,18 @@ public class AgentToolRegistryService : IAgentToolRegistryService
         await EnsureInitializedAsync(normalizedCode);
         return await Db.Queryable<AgentDefinitionEntity>()
             .FirstAsync(x => x.AgentCode == normalizedCode && x.Enabled);
+    }
+
+    /// <summary>初始化并返回所有模块提供器注册的 Agent，新增 Agent 时无需修改模型平台页面。</summary>
+    public async Task<List<AgentDefinitionEntity>> GetAllAgentsAsync()
+    {
+        foreach (var agentCode in _modules.Keys)
+            await EnsureInitializedAsync(agentCode);
+
+        return await Db.Queryable<AgentDefinitionEntity>()
+            .Where(x => x.Enabled)
+            .OrderBy(x => x.Name)
+            .ToListAsync();
     }
 
     /// <summary>查询指定 Agent 当前启用的工具。</summary>

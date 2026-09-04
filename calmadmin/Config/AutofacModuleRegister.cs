@@ -12,6 +12,8 @@ namespace 上传MES.Config
             Assembly serviceAssembly = Assembly.Load("Service");
             builder.RegisterAssemblyTypes(interfaceAssembly, serviceAssembly)
                 .Except<Service.EdgeLocalDatabaseService>()
+                .Except<Service.AgentModelDatabaseInitializer>()
+                .Except<Service.AgentSecretProtector>()
                 .AsImplementedInterfaces();
 
             // SQLite 必须由唯一服务实例持有连接和访问锁，禁止采集、上传、心跳各建连接。

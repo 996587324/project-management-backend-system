@@ -189,6 +189,42 @@ public class EdgeWebSocketSourceService : IEdgeWebSocketSourceService
     }
 
     /// <summary>
+    /// 停用所有设备下已启用连接。按设备提升一次版本，以便在线 Worker 在下一次同步时
+    /// 收到空的有效连接清单并立即关闭运行中的连接；配置本身保留，后续仍可单独启用。
+    /// </summary>
+    public async Task<EdgeWebSocketReconnectResultDto> DisableAllAsync()
+    {
+        var deviceIds = await Db.Queryable<EdgeWebSocketSourceEntity>()
+            .Where(x => x.IsDelete == 0 && x.Enabled)
+            .Select(x => x.DeviceId)
+            .Distinct()
+            .ToListAsync();
+
+        var connectionCount = 0;
+        foreach (var deviceId in deviceIds)
+        {
+            var nextVersion = await GetNextVersionAsync(deviceId);
+            connectionCount += await Db.Updateable<EdgeWebSocketSourceEntity>()
+                .SetColumns(x => new EdgeWebSocketSourceEntity
+                {
+                    Enabled = false,
+                    Version = nextVersion,
+                    UpdateTime = DateTime.Now
+                })
+                .Where(x => x.DeviceId == deviceId && x.IsDelete == 0 && x.Enabled)
+                .ExecuteCommandAsync();
+        }
+
+        var result = new EdgeWebSocketReconnectResultDto
+        {
+            DeviceCount = deviceIds.Count,
+            ConnectionCount = connectionCount
+        };
+        await AddOperationAsync("WebSocketSource.DisableAll", "All", result);
+        return result;
+    }
+
+    /// <summary>
     /// 提升指定设备所有已启用连接的运行版本，用原配置触发一次主动重连。
     /// </summary>
     public async Task<EdgeWebSocketReconnectResultDto> ReconnectDeviceAsync(int deviceId)

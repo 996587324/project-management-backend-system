@@ -9,4 +9,9 @@ public interface IEdgeGatewayLogCleanupService
     Task<int> DeleteExpiredSystemEventsAsync(
         DateTime cutoffTime,
         CancellationToken cancellationToken);
+
+    /// <summary>删除早于保留起始日期的 WebSocket 接收数据日表，并返回删除的表数量。</summary>
+    Task<int> DeleteExpiredWebSocketReceiveRecordTablesAsync(
+        DateTime oldestRetainedDate,
+        CancellationToken cancellationToken);
 }

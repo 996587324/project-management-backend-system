@@ -16,7 +16,6 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     private readonly IEdgeGatewayService _edgeGatewayService;
     private readonly IEdgeGatewayFeatureService _featureService;
     private readonly IMapper _mapper;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
     /// <summary>注入 SqlSugar、转发业务和 AutoMapper，表结构由启动初始化服务统一维护。</summary>
     public EdgeBAutoForwardService(
@@ -34,18 +33,20 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     /// <summary>读取设置；首次运行时创建默认关闭的单例记录。</summary>
     public async Task<EdgeBAutoForwardSettingOutputDto> GetSettingAsync()
     {
-        var entity = await GetOrCreateSettingAsync();
+        using var db = CreateIndependentDb();
+        var entity = await GetOrCreateSettingAsync(db);
         return _mapper.Map<EdgeBAutoForwardSettingOutputDto>(entity);
     }
 
     /// <summary>校验并保存自动转发参数，最近运行状态保持不变。</summary>
     public async Task<bool> SaveSettingAsync(EdgeBAutoForwardSettingSaveDto dto)
     {
+        using var db = CreateIndependentDb();
         Validate(dto);
-        var entity = await GetOrCreateSettingAsync();
+        var entity = await GetOrCreateSettingAsync(db);
         _mapper.Map(dto, entity);
         var updateTime = DateTime.Now;
-        await Db.Updateable<EdgeBAutoForwardSettingEntity>()
+        await db.Updateable<EdgeBAutoForwardSettingEntity>()
             .SetColumns(x => new EdgeBAutoForwardSettingEntity
             {
                 Enabled = entity.Enabled,
@@ -55,7 +56,7 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
             })
             .Where(x => x.Id == SettingId)
             .ExecuteCommandAsync();
-        await AddOperationAsync("BAutoForwardSetting.Update", entity.Id.ToString(), dto);
+        await AddOperationAsync(db, "BAutoForwardSetting.Update", entity.Id.ToString(), dto);
         return true;
     }
 
@@ -63,7 +64,8 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     public async Task<EdgeBAutoForwardSettingOutputDto> RunOnceAsync(
         CancellationToken cancellationToken)
     {
-        var setting = await GetOrCreateSettingAsync();
+        using var db = CreateIndependentDb();
+        var setting = await GetOrCreateSettingAsync(db);
         if (!setting.Enabled) return _mapper.Map<EdgeBAutoForwardSettingOutputDto>(setting);
         if (!await _featureService.IsEnabledAsync())
             return _mapper.Map<EdgeBAutoForwardSettingOutputDto>(setting);
@@ -80,7 +82,7 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
             var lastSuccessTime = result.SuccessCount > 0
                 ? lastRunTime
                 : setting.LastSuccessTime;
-            await Db.Updateable<EdgeBAutoForwardSettingEntity>()
+            await db.Updateable<EdgeBAutoForwardSettingEntity>()
                 .SetColumns(x => new EdgeBAutoForwardSettingEntity
                 {
                     LastRunTime = lastRunTime,
@@ -92,7 +94,7 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
                 })
                 .Where(x => x.Id == SettingId)
                 .ExecuteCommandAsync();
-            return await GetSettingAsync();
+            return _mapper.Map<EdgeBAutoForwardSettingOutputDto>(await GetOrCreateSettingAsync(db));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -102,7 +104,7 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
         {
             var lastRunTime = DateTime.Now;
             var lastError = ex.Message.Length > 500 ? ex.Message[..500] : ex.Message;
-            await Db.Updateable<EdgeBAutoForwardSettingEntity>()
+            await db.Updateable<EdgeBAutoForwardSettingEntity>()
                 .SetColumns(x => new EdgeBAutoForwardSettingEntity
                 {
                     LastRunTime = lastRunTime,
@@ -115,9 +117,9 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     }
 
     /// <summary>获取主键为 1 的设置记录，避免按环境配置文件控制运行状态。</summary>
-    private async Task<EdgeBAutoForwardSettingEntity> GetOrCreateSettingAsync()
+    private async Task<EdgeBAutoForwardSettingEntity> GetOrCreateSettingAsync(ISqlSugarClient db)
     {
-        var setting = await Db.Queryable<EdgeBAutoForwardSettingEntity>()
+        var setting = await db.Queryable<EdgeBAutoForwardSettingEntity>()
             .FirstAsync(x => x.Id == SettingId);
         if (setting != null) return setting;
 
@@ -131,13 +133,13 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
         };
         try
         {
-            await Db.Insertable(setting).ExecuteCommandAsync();
+            await db.Insertable(setting).ExecuteCommandAsync();
             return setting;
         }
-        catch (SqlSugarException) when (Db.Queryable<EdgeBAutoForwardSettingEntity>()
+        catch (SqlSugarException) when (db.Queryable<EdgeBAutoForwardSettingEntity>()
                    .Any(x => x.Id == SettingId))
         {
-            return await Db.Queryable<EdgeBAutoForwardSettingEntity>()
+            return await db.Queryable<EdgeBAutoForwardSettingEntity>()
                 .FirstAsync(x => x.Id == SettingId);
         }
     }
@@ -152,12 +154,20 @@ public class EdgeBAutoForwardService : IEdgeBAutoForwardService
     }
 
     /// <summary>记录自动转发设置变更。</summary>
-    private Task AddOperationAsync(string operationType, string target, object detail) =>
-        Db.Insertable(new EdgeOperationLogEntity
+    private static Task AddOperationAsync(
+        ISqlSugarClient db,
+        string operationType,
+        string target,
+        object detail) =>
+        db.Insertable(new EdgeOperationLogEntity
         {
             OperationType = operationType,
             Target = target,
             DetailJson = JsonSerializer.Serialize(detail),
             CreateTime = DateTime.Now
         }).ExecuteCommandAsync();
+
+    /// <summary>为单次设置或转发轮询创建独立 SQL Server 客户端。</summary>
+    private ISqlSugarClient CreateIndependentDb() =>
+        _dbScope.GetConnection("calmadmin").CopyNew();
 }

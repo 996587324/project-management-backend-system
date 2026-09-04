@@ -260,6 +260,39 @@ public class EdgeUploadRecordQueryDto : EdgePageQueryDto
     public bool? Success { get; set; }
 }
 
+/// <summary>中心端查询 WebSocket 发送报文记录的筛选条件。</summary>
+public class EdgeWebSocketSendRecordQueryDto : EdgePageQueryDto
+{
+    public string? DeviceCode { get; set; }
+    public string? SourceId { get; set; }
+    public bool? Success { get; set; }
+}
+
+/// <summary>边缘节点上报一次 WebSocket 报文发送结果。</summary>
+public class EdgeWebSocketSendRecordReportDto
+{
+    public string DeviceCode { get; set; } = string.Empty;
+    public string SourceId { get; set; } = string.Empty;
+    public string? SourceName { get; set; }
+    public string? Endpoint { get; set; }
+    public string SendType { get; set; } = "InitialSubscription";
+    public string Payload { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int DurationMs { get; set; }
+}
+
+/// <summary>中心端查询 WebSocket 接收数据日表的筛选条件，最多查询最近七天。</summary>
+public class EdgeWebSocketReceiveRecordQueryDto : EdgePageQueryDto
+{
+    public string? DeviceCode { get; set; }
+    public string? SourceId { get; set; }
+    public string? SourceDeviceCode { get; set; }
+    public string? DataType { get; set; }
+    public DateTime? StartDate { get; set; }
+    public DateTime? EndDate { get; set; }
+}
+
 /// <summary>边缘节点上传到中心端的标准消息 DTO。</summary>
 public class EdgeStandardMessageDto
 {

@@ -129,7 +129,8 @@ calmadmin/appsettings.Development.json
 ```json
 {
   "ConnectionStrings": {
-    "calmadmin": "Server=127.0.0.1;Database=calmadmin;User ID=sa;Password=123;Encrypt=True;TrustServerCertificate=True;"
+    "calmadmin": "Server=127.0.0.1;Database=calmadmin;User ID=sa;Password=123;Encrypt=True;TrustServerCertificate=True;",
+    "EdgeGatewayLogs": "Server=127.0.0.1;Database=EdgeGatewayLogs;User ID=sa;Password=123;Encrypt=True;TrustServerCertificate=True;"
   }
 }
 ```
@@ -142,6 +143,8 @@ calmadmin/appsettings.Development.json
 - `Password`：数据库密码
 
 项目管理、用户、角色、菜单等核心功能使用 `calmadmin` 连接。
+
+WebSocket 接收报文使用独立的 `EdgeGatewayLogs` 数据库，按 `EdgeGatewayWebSocketReceiveRecord_yyyyMMdd` 日表保存，默认保留最近 7 个自然日。应用首次启动时会使用 `calmadmin` 账号自动创建该数据库；如果部署配置没有单独提供 `EdgeGatewayLogs`，程序会沿用 `calmadmin` 的服务器和账号，仅切换数据库名。该账号需要具备创建数据库、建表和索引的权限。
 
 ### JWT 配置
 
@@ -237,6 +240,54 @@ Agent 联网调用配置在 `AgentOptions` 节点中：
 写操作不会由 LLM 直接执行。调度器会先检查工具启用状态、当前用户权限和 `InputSchema`，生成待确认计划；确认时再次校验参数哈希、权限和 Schema，之后才调用业务执行器。项目和任务删除工具未注册，Agent 无法发起删除。
 
 Agent 提问通过 `GET /ws/agent?access_token={JWT}` 升级为 WebSocket，不再使用 HTTP POST。客户端发送 `message` 事件后，服务端会依次推送 `accepted`、`progress`、`heartbeat`、`chunk`、`completed` 或 `error` 事件；会话查询、执行计划确认和邮件发送仍使用普通 HTTP 接口。Agent 项目 CSV 作为 WebSocket 消息附件交给 LLM 分析，LLM 生成 `project.create` 待确认计划，用户确认后才会批量写入数据库，不再提供直接写库的 Agent CSV HTTP 接口。
+
+### 后台管理系统 OAuth 2.0 登录
+
+后台登录页支持 OAuth 2.0 授权码登录，配置位于 `calmadmin/appsettings.json` 的 `OAuth2` 节点。服务端完成授权码交换和用户信息查询，浏览器回到登录页时只携带 60 秒内有效、仅能兑换一次的登录票据，不会把第三方 Access Token 暴露给前端。
+
+OAuth 用户信息会按配置字段同步到 `sys_user_info`：
+
+- 通用 OAuth 模式可通过 `UserNameClaim`、`PasswordClaim`、`NickNameClaim`、`EmailClaim` 映射用户信息。
+- `tcl_siam` 模式兼容《应用接入规范 v3.0》：Token 响应为 `access_token=...&expires=...`，Profile 使用 POST 表单提交 `access_token`，账号取 `id`，邮箱取 `attributes` 数组中的 `mail`。
+- TCL SIAM Profile 不返回用户密码，`SynchronizePassword=false`：已有账号保留原密码，仅同步昵称、邮箱和时间；新账号生成随机本地密码，只能通过统一认证登录。
+- 本地不存在账号时自动新增，默认角色为 `R_USER`，默认权限为 `Dashboard`，可通过 `DefaultRoles`、`DefaultPermissionKeys` 调整。
+- 已停用的本地账号仍保持停用，完成信息同步后拒绝登录。
+
+生产环境不要把服务秘钥写入仓库，使用环境变量注入：
+
+```text
+OAuth2__ClientSecret=实际服务秘钥
+```
+
+TCL SIAM 文档中的 UAT 接口示例为：
+
+```text
+AuthorizationEndpoint=https://login-uat.tcl.com/siam/oauth2.0/authorize
+TokenEndpoint=https://login-uat.tcl.com/siam/oauth2.0/accessToken
+UserInfoEndpoint=https://login-uat.tcl.com/siam/oauth2.0/profile
+```
+
+生产环境请以统一身份平台登记的实际域名为准，不要把普通登录页地址当作 `AuthorizationEndpoint`。同时需要在平台登记固定回调地址，例如 `http://localhost:8089/api/auth/oauth2/callback`；确认平台会原样回传 `state` 后，再将 `OAuth2:Enabled` 设置为 `true`。
+
+### Agent 中心：Turing 中转平台
+
+Agent 中心的“模型平台配置”内置 Turing 预置项，使用 OpenAI Chat Completions 兼容协议：
+
+```text
+Base URL:      https://live-turing.cn.llm.tcljd.com/api/v1
+Endpoint Path: /chat/completions
+认证方式:       Authorization: Bearer {API Key}
+```
+
+用户首次进入 Agent 中心的模型平台配置页时，系统会为该用户创建禁用状态的 `turing` 预置项，不会写入任何密钥。每位用户填写自己实际开通的模型编码和 API Key 后启用，并为项目管理助手或边缘计算助手设置自己的主平台、备用平台及优先级。
+
+- 密钥在服务端使用 Data Protection 加密保存，查询接口只返回掩码。
+- 每个账号的模型平台、密钥和 Agent 绑定均按用户隔离；查询、修改、测试和实际调用只会访问当前用户自己的配置。历史全局配置不会自动继承给任何用户。
+- 拥有 Agent 中心权限的角色可以管理自己的配置；默认工程师角色已补齐“模型平台配置”入口权限。
+- Turing 调用会附加顶层 `turing_options`，用于设置平台超时、重试次数和可选的模型 Fallback；调用日志保留追踪 ID、实际模型、耗时和 Token 用量，不保存对话正文。
+- “测试连接”会发送一次最小请求并产生少量 Token 用量。
+
+模型编码、可用能力和计费以 [Turing 接口文档](https://live-turing-docs.cn.llm.tcljd.com/api-guides/core-apis/choosing-an-endpoint/) 为准。当前 Agent 使用 Chat Completions；如未来需要 GPT-5 的状态化推理/MCP 或 Claude 原生 Messages 能力，再扩展对应协议适配器。
 
 新增其他 Agent 时，可在 `AgentDefinition` 中增加定义，在 `AgentToolRegistry` 中按新的 `AgentCode` 注册工具，并实现 `IAgentBusinessToolExecutor`。通用调度、确认和日志逻辑无需复制。
 

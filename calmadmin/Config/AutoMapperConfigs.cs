@@ -105,6 +105,30 @@ namespace 上传MES.Config
                     src.RequiresConfirmation && src.Status == "PendingConfirmation"))
                 .ForMember(dest => dest.Confirmed, opt => opt.MapFrom(src => src.ConfirmTime.HasValue));
 
+            // Agent 模型平台映射：密钥字段由专用保护服务处理，不允许 AutoMapper 复制。
+            CreateMap<AgentModelProviderSaveDto, AgentModelProviderEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.OwnerUserId, opt => opt.Ignore())
+                .ForMember(dest => dest.ApiKeyCipherText, opt => opt.Ignore())
+                .ForMember(dest => dest.ApiKeyMask, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<AgentModelProviderEntity, AgentModelProviderDto>(MemberList.None)
+                .ForMember(dest => dest.HasApiKey, opt => opt.Ignore());
+            CreateMap<AgentModelBindingSaveDto, AgentModelBindingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.OwnerUserId, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<AgentModelBindingEntity, AgentModelBindingDto>(MemberList.None)
+                .ForMember(dest => dest.AgentName, opt => opt.Ignore())
+                .ForMember(dest => dest.ProviderName, opt => opt.Ignore());
+            CreateMap<AgentModelInvocationLogWriteDto, AgentModelInvocationLogEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore());
+
             // 边缘 Agent 的强类型参数映射到现有 EdgeGateway 服务查询 DTO。
             CreateMap<EdgeDeviceListArguments, EdgeDeviceQueryDto>(MemberList.None);
             CreateMap<EdgeConnectionListArguments, EdgeDeviceQueryDto>(MemberList.None)
@@ -384,6 +408,27 @@ namespace 上传MES.Config
                 .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
                 .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
             CreateMap<EdgeDashboardRobotFieldBindingEntity, EdgeDashboardRobotFieldSaveDto>(MemberList.None);
+
+            CreateMap<EdgeDashboardDeviceBindingSaveDto, EdgeDashboardDeviceBindingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.MapFrom(src => src.DashboardCode.Trim()))
+                .ForMember(dest => dest.LineCode, opt => opt.MapFrom(src => src.LineCode.Trim()))
+                .ForMember(dest => dest.DeviceCode, opt => opt.MapFrom(src => src.DeviceCode.Trim()))
+                .ForMember(dest => dest.DeviceName, opt => opt.MapFrom(src => src.DeviceName.Trim()))
+                .ForMember(dest => dest.TenantMark, opt => opt.MapFrom(src => src.TenantMark.Trim()))
+                .ForMember(dest => dest.SourceDeviceMark, opt => opt.MapFrom(src => src.SourceDeviceMark.Trim()))
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardDeviceBindingEntity, EdgeDashboardDeviceBindingOutputDto>(MemberList.None)
+                .ForMember(dest => dest.Fields, opt => opt.Ignore());
+            CreateMap<EdgeDashboardDeviceFieldSaveDto, EdgeDashboardDeviceFieldBindingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DeviceBindingId, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardDeviceFieldBindingEntity, EdgeDashboardDeviceFieldSaveDto>(MemberList.None);
 
             CreateMap<EdgeDashboardRobotStateRuleSaveDto, EdgeDashboardRobotStateRuleEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())

@@ -34,12 +34,22 @@ public sealed class EdgeGatewayLogCleanupHostedService : BackgroundService
                 var deletedCount = await _cleanupService.DeleteExpiredSystemEventsAsync(
                     cutoffTime,
                     stoppingToken);
+                // 接收数据以日表保存，保留今天及前六日，共七个自然日。
+                var deletedReceiveTableCount = await _cleanupService.DeleteExpiredWebSocketReceiveRecordTablesAsync(
+                    DateTime.Today.AddDays(-6),
+                    stoppingToken);
                 if (deletedCount > 0)
                 {
                     _logger.LogInformation(
                         "Deleted {DeletedCount} expired EdgeGateway system events before {CutoffTime}.",
                         deletedCount,
                         cutoffTime);
+                }
+                if (deletedReceiveTableCount > 0)
+                {
+                    _logger.LogInformation(
+                        "Deleted {DeletedTableCount} expired EdgeGateway WebSocket receive record tables.",
+                        deletedReceiveTableCount);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
