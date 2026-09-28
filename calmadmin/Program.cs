@@ -1,4 +1,3 @@
-using Microsoft.Graph.Models.ExternalConnectors;
 using Microsoft.OpenApi.Models;
 using Model;
 using Newtonsoft.Json;

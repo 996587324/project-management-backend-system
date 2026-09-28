@@ -8,15 +8,15 @@ using SqlSugar;
 namespace Service;
 
 /// <summary>
-/// Agent 应用服务，负责编排会话、模型调用、工具调用、确认执行和最终回复。
+/// Agent 应用服务，负责编排会话、框架运行、工具调用、确认执行和最终回复。
 /// </summary>
 public class AgentService : IAgentService
 {
     private readonly SqlSugarScope _dbScope;
     private readonly IMapper _mapper;
-    private readonly IAgentModelClient _modelClient;
     private readonly IAgentToolRegistryService _registry;
     private readonly IAgentToolDispatcher _dispatcher;
+    private readonly IAgentFrameworkRuntime _frameworkRuntime;
     private readonly IEmailService _emailService;
     private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
 
@@ -30,16 +30,16 @@ public class AgentService : IAgentService
     public AgentService(
         SqlSugarScope dbScope,
         IMapper mapper,
-        IAgentModelClient modelClient,
         IAgentToolRegistryService registry,
         IAgentToolDispatcher dispatcher,
+        IAgentFrameworkRuntime frameworkRuntime,
         IEmailService emailService)
     {
         _dbScope = dbScope;
         _mapper = mapper;
-        _modelClient = modelClient;
         _registry = registry;
         _dispatcher = dispatcher;
+        _frameworkRuntime = frameworkRuntime;
         _emailService = emailService;
     }
 
@@ -159,17 +159,21 @@ public class AgentService : IAgentService
         if (interactionMode == "Chat")
         {
             await ReportProgressAsync(progress, "generating_reply", "正在生成聊天回复", conversation.Id);
-            var chatReply = await _modelClient.GenerateReplyAsync(new AgentModelRequest
+            var frameworkResult = await _frameworkRuntime.RunAsync(new AgentFrameworkRunRequest
             {
                 AgentCode = agent.AgentCode,
                 UserId = request.UserId,
+                AgentName = agent.Name,
                 UserMessage = request.Message.Trim(),
-                SystemPrompt = agent.SystemPrompt,
-                History = history
+                SystemPrompt = agent.SystemPrompt ?? string.Empty,
+                ScopeProjectName = request.ScopeProjectName ?? conversation.ScopeProjectName,
+                ConversationId = conversation.Id,
+                History = history,
+                Tools = []
             });
-            var chatReplyText = chatReply.Success && !string.IsNullOrWhiteSpace(chatReply.Content)
-                ? chatReply.Content.Trim()
-                : chatReply.ErrorMessage ?? "暂时无法回答该问题";
+            var chatReplyText = frameworkResult.Success && !string.IsNullOrWhiteSpace(frameworkResult.Reply)
+                ? frameworkResult.Reply.Trim()
+                : frameworkResult.ErrorMessage ?? "暂时无法回答该问题";
             await AddMessageAsync(conversation.Id, "assistant", chatReplyText);
             await TouchConversationAsync(conversation.Id);
             await ReportProgressAsync(progress, "saving_result", "回答已生成，正在保存会话", conversation.Id);
@@ -196,68 +200,50 @@ public class AgentService : IAgentService
             "selecting_tools",
             isProjectCsv ? "LLM 正在分析 CSV 并整理待写入项目" : "正在理解问题并选择合适的工具",
             conversation.Id);
-        var selection = await _modelClient.SelectToolsAsync(new AgentToolSelectionRequest
+        var frameworkRun = await _frameworkRuntime.RunAsync(new AgentFrameworkRunRequest
         {
             AgentCode = agent.AgentCode,
             UserId = request.UserId,
+            AgentName = agent.Name,
             SystemPrompt = agent.SystemPrompt ?? string.Empty,
             UserMessage = modelUserMessage,
             ScopeProjectName = request.ScopeProjectName ?? conversation.ScopeProjectName,
+            ConversationId = conversation.Id,
             History = history,
             Tools = toolDefinitions,
             MaxToolCalls = agent.MaxToolCalls,
-            MaxOutputTokens = isProjectCsv ? 6000 : null
+            MaxOutputTokens = isProjectCsv ? 6000 : null,
+            OnToolInvokingAsync = tool => ReportProgressAsync(
+                progress,
+                "executing_tool",
+                $"正在处理：{tool.Title}",
+                conversation.Id)
         });
 
-        var calls = new List<AgentToolCallDto>();
-        var plan = new List<AgentPlanStepDto>();
-        if (selection.Success)
-        {
-            var toolMap = tools.ToDictionary(x => x.ToolName, StringComparer.OrdinalIgnoreCase);
-            foreach (var selected in selection.ToolCalls.Take(Math.Clamp(agent.MaxToolCalls, 1, 8)))
+        var calls = frameworkRun.ToolCalls;
+        var toolMap = tools.ToDictionary(x => x.ToolName, StringComparer.OrdinalIgnoreCase);
+        var plan = calls
+            .Select((call, index) =>
             {
-                var toolTitle = toolMap.TryGetValue(selected.ToolName, out var selectedTool)
-                    ? selectedTool.Title
-                    : selected.ToolName;
-                await ReportProgressAsync(
-                    progress,
-                    "executing_tool",
-                    $"正在处理：{toolTitle}",
-                    conversation.Id);
-                var call = await _dispatcher.DispatchAsync(new AgentToolDispatchRequest
+                toolMap.TryGetValue(call.ToolName, out var tool);
+                return new AgentPlanStepDto
                 {
-                    ConversationId = conversation.Id,
-                    AgentCode = agent.AgentCode,
-                    ToolName = selected.ToolName,
-                    ArgumentsJson = selected.ArgumentsJson,
-                    UserId = request.UserId
-                });
-                calls.Add(call);
-
-                if (toolMap.TryGetValue(selected.ToolName, out var tool))
-                {
-                    plan.Add(new AgentPlanStepDto
-                    {
-                        Sort = plan.Count + 1,
-                        Title = tool.Title,
-                        Description = tool.Description ?? string.Empty,
-                        ToolName = tool.ToolName,
-                        ArgumentsJson = selected.ArgumentsJson,
-                        RequiresConfirmation = tool.RequiresConfirmation
-                    });
-                }
-            }
-        }
+                    Sort = index + 1,
+                    Title = tool?.Title ?? call.ToolName,
+                    Description = tool?.Description ?? string.Empty,
+                    ToolName = call.ToolName,
+                    ArgumentsJson = call.RequestJson,
+                    RequiresConfirmation = call.RequiresConfirmation
+                };
+            })
+            .ToList();
 
         await ReportProgressAsync(progress, "generating_reply", "工具处理完成，正在组织回答", conversation.Id);
-        var reply = await BuildFinalReplyAsync(
-            request,
-            modelUserMessage,
-            conversation,
-            agent,
-            history,
-            selection,
-            calls);
+        var reply = frameworkRun.Success && !string.IsNullOrWhiteSpace(frameworkRun.Reply)
+            ? frameworkRun.Reply.Trim()
+            : BuildFallbackReply(calls, frameworkRun.ErrorMessage);
+        if (isProjectCsv && !calls.Any())
+            reply = $"CSV 已完成分析，但 LLM 没有生成可确认的项目新增计划，因此没有写入任何数据。请检查表头和必填字段后重试。\n\n{reply}";
         await ReportProgressAsync(progress, "saving_result", "回答已生成，正在保存会话", conversation.Id);
         await AddMessageAsync(conversation.Id, "assistant", reply);
         await TouchConversationAsync(conversation.Id);
@@ -458,69 +444,6 @@ public class AgentService : IAgentService
             RequiresConfirmation = false,
             Suggestions = await _registry.GetSuggestionsAsync(conversation.AgentCode)
         };
-    }
-
-    /// <summary>
-    /// 根据工具执行结果生成最终回复；模型不可用时使用本地兜底回复。
-    /// </summary>
-    private async Task<string> BuildFinalReplyAsync(
-        AgentSendRequest request,
-        string modelUserMessage,
-        AgentConversationEntity conversation,
-        AgentDefinitionEntity agent,
-        List<AgentMessageDto> history,
-        AgentToolSelectionReply selection,
-        List<AgentToolCallDto> calls)
-    {
-        if (!selection.Success)
-            return agent.AgentCode == AgentCodes.ProjectManagement
-                ? $"项目管理 Agent 暂时无法选择工具：{selection.ErrorMessage}"
-                : $"{agent.Name}暂时无法选择工具：{selection.ErrorMessage}";
-
-        if (IsProjectCsvRequest(request) && !calls.Any())
-        {
-            var detail = string.IsNullOrWhiteSpace(selection.Content)
-                ? string.Empty
-                : $"\n\nLLM 分析结果：{selection.Content.Trim()}";
-            return $"CSV 已完成分析，但 LLM 没有生成可确认的项目新增计划，因此没有写入任何数据。请检查表头和必填字段后重试。{detail}";
-        }
-
-        if (!calls.Any())
-        {
-            if (!string.IsNullOrWhiteSpace(selection.Content)) return selection.Content.Trim();
-            var directReply = await _modelClient.GenerateReplyAsync(new AgentModelRequest
-            {
-                AgentCode = agent.AgentCode,
-                UserId = request.UserId,
-                UserMessage = modelUserMessage,
-                SystemPrompt = agent.SystemPrompt,
-                ScopeProjectName = request.ScopeProjectName ?? conversation.ScopeProjectName,
-                History = history
-            });
-            return directReply.Success ? directReply.Content : directReply.ErrorMessage ?? "暂时无法回答该问题";
-        }
-
-        var modelReply = await _modelClient.GenerateReplyAsync(new AgentModelRequest
-        {
-            AgentCode = agent.AgentCode,
-            UserId = request.UserId,
-            UserMessage = IsProjectCsvRequest(request)
-                ? $"{request.Message}\n请逐项列出 LLM 整理出的待写入项目，并明确说明当前仍需用户确认，尚未写入数据库。"
-                : request.Message,
-            SystemPrompt = agent.SystemPrompt,
-            ScopeProjectName = request.ScopeProjectName ?? conversation.ScopeProjectName,
-            History = history,
-            ToolResults = calls.Select(x => new AgentToolResultMessageDto
-            {
-                ToolName = x.ToolName,
-                Status = x.Status,
-                ResultJson = x.ResponseJson
-            }).ToList()
-        });
-
-        return modelReply.Success && !string.IsNullOrWhiteSpace(modelReply.Content)
-            ? modelReply.Content.Trim()
-            : BuildFallbackReply(calls, modelReply.ErrorMessage);
     }
 
     private static bool IsProjectCsvRequest(AgentSendRequest request) =>

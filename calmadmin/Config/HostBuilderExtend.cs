@@ -324,6 +324,7 @@ namespace 上传MES.Config
             builder.Services.AddScoped<IEmailService, EmailService>();
             builder.Services.AddScoped<IAgentToolRegistryService, AgentToolRegistryService>();
             builder.Services.AddScoped<IAgentToolDispatcher, AgentToolDispatcher>();
+            builder.Services.AddScoped<IAgentFrameworkRuntime, MicrosoftAgentFrameworkRuntime>();
             builder.Services.AddScoped<IAgentBusinessToolExecutor, ProjectManagementAgentToolExecutor>();
             builder.Services.AddScoped<IAgentBusinessToolExecutor, AgentEmailBusinessToolExecutor>();
             builder.Services.AddScoped<IAgentService, AgentService>();
