@@ -1,4 +1,5 @@
 using AutoMapper;
+using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
@@ -221,14 +222,18 @@ public class EdgeGatewayService : IEdgeGatewayService
     private static readonly TimeSpan OnlineWindow = TimeSpan.FromMinutes(3);
     private static readonly HttpClient BSystemClient = new() { Timeout = TimeSpan.FromSeconds(20) };
     private static readonly SemaphoreSlim BForwardSemaphore = new(1, 1);
+    private static readonly SemaphoreSlim WebSocketReceiveTableGate = new(1, 1);
+    private static readonly HashSet<string> EnsuredWebSocketReceiveTables = new(StringComparer.OrdinalIgnoreCase);
     private readonly SqlSugarScope _dbScope;
     private readonly IMapper _mapper;
     private readonly IEdgeWebSocketSourceService _webSocketSourceService;
     private readonly IEdgeBMappingResolver _bMappingResolver;
     private readonly IEdgeGatewayFeatureService _featureService;
+    private readonly IEdgeDataTraceService _dataTraceService;
+    private readonly ILogger<EdgeGatewayService> _logger;
     private readonly IReadOnlyDictionary<string, IBSystemTransportSender> _bSystemTransportSenders;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
-    private ISqlSugarClient WebSocketLogDb => _dbScope.GetConnectionScope("edge-gateway-logs");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
+    private ISqlSugarClient WebSocketLogDb => DatabaseOperationScope.GetConnection(_dbScope, "edge-gateway-logs");
 
     private sealed class EdgeImportRow
     {
@@ -246,6 +251,8 @@ public class EdgeGatewayService : IEdgeGatewayService
         IEdgeWebSocketSourceService webSocketSourceService,
         IEdgeBMappingResolver bMappingResolver,
         IEdgeGatewayFeatureService featureService,
+        IEdgeDataTraceService dataTraceService,
+        ILogger<EdgeGatewayService> logger,
         IEnumerable<IBSystemTransportSender> bSystemTransportSenders)
     {
         _dbScope = dbScope;
@@ -253,6 +260,8 @@ public class EdgeGatewayService : IEdgeGatewayService
         _webSocketSourceService = webSocketSourceService;
         _bMappingResolver = bMappingResolver;
         _featureService = featureService;
+        _dataTraceService = dataTraceService;
+        _logger = logger;
         _bSystemTransportSenders = bSystemTransportSenders.ToDictionary(
             x => x.Protocol,
             StringComparer.OrdinalIgnoreCase);
@@ -972,10 +981,60 @@ public class EdgeGatewayService : IEdgeGatewayService
             var queueEntity = _mapper.Map<EdgeMessageQueueEntity>(message);
             queueEntity.DeviceCode = deviceCode;
             await Db.Insertable(queueEntity).ExecuteCommandAsync();
-            await AddWebSocketReceiveRecordAsync(message, deviceCode);
+            // 主消息已可靠进入中心队列；日志日表和追溯库是可重试投影，不能因短暂故障
+            // 让边缘节点反复上传并阻塞后续实时数据。
+            await ProjectMessageAsync(queueEntity, message, CancellationToken.None);
             result.AcceptedCount++;
         }
         return result;
+    }
+
+    /// <summary>
+    /// 补偿近期未完成的接收日表和数据追溯投影。主消息在中心队列中保留，
+    /// 因此日志库重连、日表切换或短暂锁表后均可恢复展示数据。
+    /// </summary>
+    public async Task<int> RecoverMessageProjectionsAsync(int limit, CancellationToken cancellationToken = default)
+    {
+        using var operation = DatabaseOperationScope.Begin(_dbScope);
+        var maximum = Math.Clamp(limit, 1, 500);
+        var retention = await _dataTraceService.GetSettingAsync();
+        var cutoff = DateTime.Now.AddHours(-retention.RetentionHours);
+        var pending = await Db.Queryable<EdgeMessageQueueEntity>()
+            .Where(x => x.CreateTime >= cutoff &&
+                (x.ReceiveRecordProjectedTime == null || x.DataTraceProjectedTime == null))
+            .OrderBy(x => x.CreateTime)
+            .Take(maximum)
+            .ToListAsync();
+        var recovered = 0;
+        foreach (var queueEntity in pending)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            EdgeStandardMessageDto? message;
+            try
+            {
+                message = JsonSerializer.Deserialize<EdgeStandardMessageDto>(queueEntity.StandardPayloadJson,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogWarning(ex,
+                    "Cannot recover EdgeGateway projections for malformed queue message {MessageId}.",
+                    queueEntity.MessageId);
+                continue;
+            }
+            if (message == null || string.IsNullOrWhiteSpace(message.MessageId))
+            {
+                _logger.LogWarning(
+                    "Cannot recover EdgeGateway projections because queue message {MessageId} has no payload identifier.",
+                    queueEntity.MessageId);
+                continue;
+            }
+            var before = queueEntity.ReceiveRecordProjectedTime == null || queueEntity.DataTraceProjectedTime == null;
+            await ProjectMessageAsync(queueEntity, message, cancellationToken);
+            if (before && queueEntity.ReceiveRecordProjectedTime != null && queueEntity.DataTraceProjectedTime != null)
+                recovered++;
+        }
+        return recovered;
     }
 
     /// <summary>把指定失败队列记录重置为 Pending，允许再次转发。</summary>
@@ -2511,10 +2570,72 @@ public class EdgeGatewayService : IEdgeGatewayService
         return trimmed.Length > maxLength ? trimmed[..maxLength] : trimmed;
     }
 
-    /// <summary>把一条已进入中心端队列的 WebSocket 原始报文写入当天的物理日表。</summary>
-    private async Task AddWebSocketReceiveRecordAsync(EdgeStandardMessageDto message, string deviceCode)
+    /// <summary>
+    /// 写入接收日表和追溯历史点，并分别持久化完成标记。一项失败不会影响另一项，
+    /// 未完成标记会由后台补偿任务继续处理。
+    /// </summary>
+    private async Task ProjectMessageAsync(
+        EdgeMessageQueueEntity queueEntity,
+        EdgeStandardMessageDto message,
+        CancellationToken cancellationToken)
     {
-        var now = DateTime.Now;
+        if (queueEntity.ReceiveRecordProjectedTime == null)
+        {
+            try
+            {
+                await AddWebSocketReceiveRecordAsync(message, queueEntity.DeviceCode, queueEntity.CreateTime);
+                queueEntity.ReceiveRecordProjectedTime = DateTime.Now;
+                await Db.Updateable<EdgeMessageQueueEntity>()
+                    .SetColumns(x => new EdgeMessageQueueEntity
+                    {
+                        ReceiveRecordProjectedTime = queueEntity.ReceiveRecordProjectedTime
+                    })
+                    .Where(x => x.Id == queueEntity.Id)
+                    .ExecuteCommandAsync();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex,
+                    "WebSocket receive record projection failed for queue message {MessageId}; it will be retried.",
+                    queueEntity.MessageId);
+            }
+        }
+
+        if (queueEntity.DataTraceProjectedTime == null)
+        {
+            try
+            {
+                await _dataTraceService.CaptureAsync(message, queueEntity.DeviceCode, cancellationToken);
+                queueEntity.DataTraceProjectedTime = DateTime.Now;
+                await Db.Updateable<EdgeMessageQueueEntity>()
+                    .SetColumns(x => new EdgeMessageQueueEntity
+                    {
+                        DataTraceProjectedTime = queueEntity.DataTraceProjectedTime
+                    })
+                    .Where(x => x.Id == queueEntity.Id)
+                    .ExecuteCommandAsync();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex,
+                    "Data trace projection failed for queue message {MessageId}; it will be retried.",
+                    queueEntity.MessageId);
+            }
+        }
+    }
+
+    /// <summary>把一条已进入中心端队列的 WebSocket 原始报文写入所属日期的物理日表。</summary>
+    private async Task AddWebSocketReceiveRecordAsync(
+        EdgeStandardMessageDto message,
+        string deviceCode,
+        DateTime receivedTime)
+    {
+        var now = receivedTime == default ? DateTime.Now : receivedTime;
+        await EnsureWebSocketReceiveRecordTableAsync(now, cancellationToken: CancellationToken.None);
+        var exists = await WebSocketLogDb.Queryable<EdgeWebSocketReceiveRecordEntity>()
+            .SplitTable(now.Date, now.Date)
+            .AnyAsync(x => x.MessageId == message.MessageId);
+        if (exists) return;
         var record = new EdgeWebSocketReceiveRecordEntity
         {
             MessageId = message.MessageId.Trim(),
@@ -2529,6 +2650,38 @@ public class EdgeGatewayService : IEdgeGatewayService
         record.Id = await WebSocketLogDb.Insertable(record)
             .SplitTable()
             .ExecuteReturnSnowflakeIdAsync();
+    }
+
+    /// <summary>
+    /// 服务跨天运行时，不能依赖启动阶段创建的旧日日表；首次写入新日期前按实体模型创建表结构。
+    /// </summary>
+    private async Task EnsureWebSocketReceiveRecordTableAsync(DateTime day, CancellationToken cancellationToken)
+    {
+        var tableName = $"EdgeGatewayWebSocketReceiveRecord_{day:yyyyMMdd}";
+        lock (EnsuredWebSocketReceiveTables)
+        {
+            if (EnsuredWebSocketReceiveTables.Contains(tableName)) return;
+        }
+
+        await WebSocketReceiveTableGate.WaitAsync(cancellationToken);
+        try
+        {
+            lock (EnsuredWebSocketReceiveTables)
+            {
+                if (EnsuredWebSocketReceiveTables.Contains(tableName)) return;
+            }
+
+            if (!WebSocketLogDb.DbMaintenance.IsAnyTable(tableName, false))
+                WebSocketLogDb.CodeFirst.As<EdgeWebSocketReceiveRecordEntity>(tableName).InitTables();
+            lock (EnsuredWebSocketReceiveTables)
+            {
+                EnsuredWebSocketReceiveTables.Add(tableName);
+            }
+        }
+        finally
+        {
+            WebSocketReceiveTableGate.Release();
+        }
     }
 
     /// <summary>日表查询日期最多覆盖今天及之前六日，严格限制在最近七个自然日。</summary>

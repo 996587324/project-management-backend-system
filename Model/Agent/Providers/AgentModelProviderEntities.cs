@@ -124,7 +124,8 @@ public sealed class AgentModelInvocationLogEntity
 
     public bool Success { get; set; }
     public int? StatusCode { get; set; }
-    public int? BusinessCode { get; set; }
+    /// <summary>模型平台业务码；0 表示该次调用未返回业务码，兼容历史非空数据库列。</summary>
+    public int BusinessCode { get; set; }
 
     [SugarColumn(Length = 1000, IsNullable = true)]
     public string? ErrorMessage { get; set; }

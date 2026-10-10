@@ -16,7 +16,7 @@ public sealed class AgentModelProviderService : IAgentModelProviderService
     private readonly IAgentSecretProtector _secretProtector;
     private readonly IAgentModelDatabaseInitializer _initializer;
     private readonly IAgentToolRegistryService _toolRegistryService;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     public AgentModelProviderService(
         SqlSugarScope dbScope,

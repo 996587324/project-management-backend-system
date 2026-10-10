@@ -17,3 +17,16 @@
 /.codex-build/ws-temp-interface/ws-obj/Release/net8.0
 /.codex-build/ws-temp-interface/ws-obj
 /.codex-build
+/_verify_agent_device_cards
+/_verify_ai_column_default
+/_verify_build
+/_verify_build_pda
+/_verify_device_cards
+/_verify_device_card_linkage
+/_verify_external_mcp_json
+/_verify_external_mcp_schema
+/_verify_external_tools
+/_verify_external_tools_menu
+/_verify_external_tools_scope_length
+/_verify_mcp_server_setting
+/_verify_public_dashboard

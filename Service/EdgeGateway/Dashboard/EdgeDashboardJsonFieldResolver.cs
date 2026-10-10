@@ -34,15 +34,34 @@ internal static class EdgeDashboardJsonFieldResolver
             sample.SourceTimestamp,
             sample.Data);
 
+    /// <summary>只包含本次明确上报的数据，用于追溯触发和历史字段目录的最后出现时间。</summary>
+    public static JObject BuildReportedEnvelope(EdgeDashboardTelemetrySampleDto sample) =>
+        BuildEnvelope(
+            sample.DeviceMark,
+            sample.ModelMark,
+            sample.DataType,
+            sample.TenantMark,
+            sample.MessageId,
+            sample.SourceTimestamp,
+            sample.ReportedData ?? sample.Data);
+
     /// <summary>解析 JSON Pointer；不存在时返回 null。</summary>
     public static JToken? Resolve(JObject envelope, string sourcePath)
+    {
+        var value = ResolveIncludingNull(envelope, sourcePath);
+        return value?.Type == JTokenType.Null ? null : value;
+    }
+
+    /// <summary>明确 null（包括父对象被清空）返回 JSON null；从未出现的字段才返回 CLR null。</summary>
+    public static JToken? ResolveIncludingNull(JObject envelope, string sourcePath)
     {
         if (string.IsNullOrWhiteSpace(sourcePath) || sourcePath == "/") return envelope;
         if (!sourcePath.StartsWith('/')) return null;
 
         JToken current = envelope;
-        foreach (var encodedSegment in sourcePath.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var encodedSegment in sourcePath.Split('/').Skip(1))
         {
+            if (current.Type == JTokenType.Null) return current;
             var segment = encodedSegment.Replace("~1", "/").Replace("~0", "~");
             if (current is JObject obj)
             {
@@ -60,9 +79,12 @@ internal static class EdgeDashboardJsonFieldResolver
                 continue;
             }
 
+            // 明确替换数组或把对象改为标量时，原子字段被清空；不是未上报。
+            if (current is JArray || current is JValue) return JValue.CreateNull();
+
             return null;
         }
-        return current.Type == JTokenType.Null ? null : current;
+        return current;
     }
 
     /// <summary>递归展开完整报文中的叶子字段供前端树形选择。</summary>

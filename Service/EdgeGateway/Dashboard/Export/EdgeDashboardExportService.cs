@@ -15,7 +15,7 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
     private static readonly SemaphoreSlim ScheduledExportGate = new(1, 1);
     private readonly SqlSugarScope _dbScope;
     private readonly IMapper _mapper;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
     private static string ExportRoot => Path.GetFullPath(Path.Combine(
         AppContext.BaseDirectory,
         "App_Data",
@@ -189,6 +189,7 @@ public sealed class EdgeDashboardExportService : IEdgeDashboardExportService
         DateTime now,
         CancellationToken cancellationToken = default)
     {
+        using var operation = DatabaseOperationScope.Begin(_dbScope);
         if (!await ScheduledExportGate.WaitAsync(0, cancellationToken)) return 0;
         try
         {

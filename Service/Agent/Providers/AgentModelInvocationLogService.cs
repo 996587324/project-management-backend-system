@@ -13,7 +13,7 @@ public sealed class AgentModelInvocationLogService : IAgentModelInvocationLogSer
     private readonly IMapper _mapper;
     private readonly IAgentModelDatabaseInitializer _initializer;
     private readonly ILogger<AgentModelInvocationLogService> _logger;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     public AgentModelInvocationLogService(
         SqlSugarScope dbScope,

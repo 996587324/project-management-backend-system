@@ -430,6 +430,29 @@ namespace 上传MES.Config
                 .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
             CreateMap<EdgeDashboardDeviceFieldBindingEntity, EdgeDashboardDeviceFieldSaveDto>(MemberList.None);
 
+            CreateMap<EdgeDashboardModelDisplayMappingSaveDto, EdgeDashboardModelDisplayMappingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardModelDisplayMappingEntity, EdgeDashboardModelDisplayMappingOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardDeviceCardSaveDto, EdgeDashboardDeviceCardEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardDeviceCardEntity, EdgeDashboardDeviceCardOutputDto>(MemberList.None)
+                .ForMember(dest => dest.Fields, opt => opt.Ignore());
+            CreateMap<EdgeDashboardDeviceCardFieldSaveDto, EdgeDashboardDeviceCardFieldEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.CardId, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardDeviceCardFieldEntity, EdgeDashboardDeviceCardFieldSaveDto>(MemberList.None);
+            CreateMap<EdgeDashboardDeviceCardChangeRecordEntity, EdgeDashboardDeviceCardChangeRecordOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardDeviceCardAlertRecordEntity, EdgeDashboardDeviceCardAlertRecordOutputDto>(MemberList.None);
+
             CreateMap<EdgeDashboardRobotStateRuleSaveDto, EdgeDashboardRobotStateRuleEntity>(MemberList.None)
                 .ForMember(dest => dest.Id, opt => opt.Ignore())
                 .ForMember(dest => dest.RobotBindingId, opt => opt.Ignore())
@@ -447,6 +470,22 @@ namespace 上传MES.Config
                 .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
                 .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
             CreateMap<EdgeDashboardModelAlarmRuleEntity, EdgeDashboardModelAlarmRuleOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardModelFieldDisplayMappingSaveDto, EdgeDashboardModelFieldDisplayMappingEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.Ignore())
+                .ForMember(dest => dest.ModelMark, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardModelFieldDisplayMappingEntity, EdgeDashboardModelFieldDisplayMappingOutputDto>(MemberList.None);
+            CreateMap<EdgeDashboardModelStatePrioritySaveDto, EdgeDashboardModelStatePriorityEntity>(MemberList.None)
+                .ForMember(dest => dest.Id, opt => opt.Ignore())
+                .ForMember(dest => dest.DashboardCode, opt => opt.Ignore())
+                .ForMember(dest => dest.ModelMark, opt => opt.Ignore())
+                .ForMember(dest => dest.IsDelete, opt => opt.Ignore())
+                .ForMember(dest => dest.CreateTime, opt => opt.Ignore())
+                .ForMember(dest => dest.UpdateTime, opt => opt.Ignore());
+            CreateMap<EdgeDashboardModelStatePriorityEntity, EdgeDashboardModelStatePriorityOutputDto>(MemberList.None);
             CreateMap<EdgeDashboardModelFieldCatalogEntity, EdgeDashboardSourceFieldOptionDto>(MemberList.None)
                 .ForMember(dest => dest.CurrentValue, opt => opt.Ignore());
 

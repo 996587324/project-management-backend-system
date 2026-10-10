@@ -12,11 +12,18 @@ namespace calmadmin.Controllers;
 public sealed class EdgeDashboardController : ControllerBase
 {
     private readonly IEdgeDashboardService _service;
+    private readonly IEdgeDashboardAiInsightService _insightService;
+    private readonly IEdgeDashboardModelConfigurationTransferService _modelConfigurationTransferService;
 
     /// <summary>通过 IOC 注入机械手看板业务服务。</summary>
-    public EdgeDashboardController(IEdgeDashboardService service)
+    public EdgeDashboardController(
+        IEdgeDashboardService service,
+        IEdgeDashboardAiInsightService insightService,
+        IEdgeDashboardModelConfigurationTransferService modelConfigurationTransferService)
     {
         _service = service;
+        _insightService = insightService;
+        _modelConfigurationTransferService = modelConfigurationTransferService;
     }
 
     /// <summary>查询可绑定 HTTP 数据源的模型大类及其设备数量。</summary>
@@ -61,6 +68,65 @@ public sealed class EdgeDashboardController : ControllerBase
         [FromBody] EdgeDashboardModelAlarmRuleListSaveDto dto) =>
         await ExecuteAsync(() => _service.SaveModelAlarmRulesAsync(dto), "模型报警映射已保存");
 
+    /// <summary>查询按模型统一维护的字段展示映射。</summary>
+    [HttpGet("model-field-display-mappings")]
+    public async Task<IActionResult> GetModelFieldDisplayMappings(
+        [FromQuery] string dashboardCode,
+        [FromQuery] string modelMark) =>
+        await ExecuteAsync(() => _service.GetModelFieldDisplayMappingsAsync(dashboardCode, modelMark));
+
+    /// <summary>整体保存按模型共享的字段展示映射。</summary>
+    [HttpPost("model-field-display-mappings")]
+    public async Task<IActionResult> SaveModelFieldDisplayMappings(
+        [FromBody] EdgeDashboardModelFieldDisplayMappingListSaveDto dto) =>
+        await ExecuteAsync(() => _service.SaveModelFieldDisplayMappingsAsync(dto), "模型字段展示映射已保存");
+
+    /// <summary>查询按模型共享的状态冲突优先级。</summary>
+    [HttpGet("model-state-priorities")]
+    public async Task<IActionResult> GetModelStatePriorities(
+        [FromQuery] string dashboardCode,
+        [FromQuery] string modelMark) =>
+        await ExecuteAsync(() => _service.GetModelStatePrioritiesAsync(dashboardCode, modelMark));
+
+    /// <summary>整体保存按模型共享的状态冲突优先级。</summary>
+    [HttpPost("model-state-priorities")]
+    public async Task<IActionResult> SaveModelStatePriorities(
+        [FromBody] EdgeDashboardModelStatePriorityListSaveDto dto) =>
+        await ExecuteAsync(() => _service.SaveModelStatePrioritiesAsync(dto), "模型状态优先级已保存");
+
+    /// <summary>下载模型映射、字段展示映射和状态优先级的 Excel 模板或当前配置。</summary>
+    [HttpGet("model-configuration-template")]
+    public async Task<IActionResult> DownloadModelConfigurationTemplate(
+        [FromQuery] string dashboardCode = "production-dashboard",
+        [FromQuery] bool includeData = false)
+    {
+        var file = await _modelConfigurationTransferService.ExportAsync(
+            dashboardCode,
+            includeData,
+            HttpContext.RequestAborted);
+        return File(file.Content, file.ContentType, file.FileName);
+    }
+
+    /// <summary>导入设备模型映射、模型字段展示映射或模型状态优先级。Excel 支持三个工作表，CSV 需指定类别。</summary>
+    [HttpPost("model-configuration-import")]
+    public async Task<IActionResult> ImportModelConfiguration(
+        [FromForm] IFormFile file,
+        [FromForm] string dashboardCode = "production-dashboard",
+        [FromForm] string? csvConfigurationType = null)
+    {
+        if (file == null || file.Length == 0) return Error("请选择需要导入的文件", 400);
+        if (file.Length > 10 * 1024 * 1024) return Error("导入文件不能超过 10MB", 400);
+        await using var stream = file.OpenReadStream();
+        return await ExecuteAsync(
+            () => _modelConfigurationTransferService.ImportAsync(
+                file.FileName,
+                stream,
+                dashboardCode,
+                csvConfigurationType,
+                HttpContext.RequestAborted),
+            "模型配置导入完成");
+    }
+
     /// <summary>查询一条线体的机械手绑定和状态规则。</summary>
     [HttpGet("bindings")]
     public async Task<IActionResult> GetBindings([FromQuery] string lineCode) =>
@@ -80,6 +146,82 @@ public sealed class EdgeDashboardController : ControllerBase
     [HttpPost("device-bindings")]
     public async Task<IActionResult> SaveDeviceBinding([FromBody] EdgeDashboardDeviceBindingSaveDto dto) =>
         await ExecuteAsync(() => _service.SaveDeviceBindingAsync(dto), "设备绑定已保存");
+
+    /// <summary>查询设备模型标识与业务显示名称的映射配置。</summary>
+    [HttpGet("model-display-mappings")]
+    public async Task<IActionResult> GetModelDisplayMappings([FromQuery] string dashboardCode = "production-dashboard") =>
+        await ExecuteAsync(() => _service.GetModelDisplayMappingsAsync(dashboardCode));
+
+    /// <summary>新增或修改设备模型业务名称映射。</summary>
+    [HttpPost("model-display-mappings")]
+    public async Task<IActionResult> SaveModelDisplayMapping(
+        [FromBody] EdgeDashboardModelDisplayMappingSaveDto dto) =>
+        await ExecuteAsync(() => _service.SaveModelDisplayMappingAsync(dto), "设备模型映射已保存");
+
+    /// <summary>软删除设备模型业务名称映射。</summary>
+    [HttpDelete("model-display-mappings/{id:long}")]
+    public async Task<IActionResult> DeleteModelDisplayMapping(long id) =>
+        await ExecuteAsync(async () =>
+        {
+            await _service.DeleteModelDisplayMappingAsync(id);
+            return new { id };
+        }, "设备模型映射已删除");
+
+    /// <summary>查询设备卡片配置；未传 lineCode 时读取全部线体。</summary>
+    [HttpGet("device-cards")]
+    public async Task<IActionResult> GetDeviceCards([FromQuery] string? lineCode) =>
+        await ExecuteAsync(() => _service.GetDeviceCardsAsync(lineCode));
+
+    /// <summary>保存设备卡片、展示字段和选择性追溯字段。</summary>
+    [HttpPost("device-cards")]
+    public async Task<IActionResult> SaveDeviceCard([FromBody] EdgeDashboardDeviceCardSaveDto dto) =>
+        await ExecuteAsync(() => _service.SaveDeviceCardAsync(dto), "设备卡片已保存");
+
+    [HttpDelete("device-cards/{id:long}")]
+    public async Task<IActionResult> DeleteDeviceCard(long id) =>
+        await ExecuteAsync(async () =>
+        {
+            await _service.DeleteDeviceCardAsync(id);
+            return new { id };
+        }, "设备卡片已删除");
+
+    /// <summary>保存指定线体设备卡片每行展示数量。</summary>
+    [HttpPost("device-card-board-setting")]
+    public async Task<IActionResult> SaveDeviceCardBoardSetting(
+        [FromBody] EdgeDashboardDeviceCardBoardSettingDto dto) =>
+        await ExecuteAsync(() => _service.SaveDeviceCardBoardSettingAsync(dto), "设备卡片布局已保存");
+
+    /// <summary>一次返回设备卡片、实时状态与顶部汇总。</summary>
+    [HttpGet("device-card-runtime")]
+    public async Task<IActionResult> GetDeviceCardRuntime([FromQuery] string? lineCode) =>
+        await ExecuteAsync(() => _service.GetDeviceCardBoardRuntimeAsync(lineCode));
+
+    /// <summary>分页查询设备卡片字段变更追溯记录。</summary>
+    [HttpGet("device-card-change-records")]
+    public async Task<IActionResult> GetDeviceCardChangeRecords(
+        [FromQuery] EdgeDashboardDeviceCardChangeQueryDto query) =>
+        await ExecuteAsync(() => _service.GetDeviceCardChangeRecordsAsync(query));
+
+    /// <summary>分页查询设备卡片数值字段上下限触发的告警及恢复记录。</summary>
+    [HttpGet("device-card-alert-records")]
+    public async Task<IActionResult> GetDeviceCardAlertRecords(
+        [FromQuery] EdgeDashboardDeviceCardAlertQueryDto query) =>
+        await ExecuteAsync(() => _service.GetDeviceCardAlertRecordsAsync(query));
+
+    /// <summary>读取一条线体绑定的产量来源设备与报文字段。</summary>
+    [HttpGet("line-output-binding")]
+    public async Task<IActionResult> GetLineOutputBinding([FromQuery] string lineCode) =>
+        await ExecuteAsync(() => _service.GetLineOutputBindingAsync(lineCode));
+
+    /// <summary>保存线体产量来源设备和数值字段。</summary>
+    [HttpPost("line-output-binding")]
+    public async Task<IActionResult> SaveLineOutputBinding([FromBody] EdgeDashboardLineOutputBindingSaveDto dto) =>
+        await ExecuteAsync(() => _service.SaveLineOutputBindingAsync(dto), "线体产量绑定已保存");
+
+    /// <summary>读取当前线体根据绑定字段计算出的当日产出。</summary>
+    [HttpGet("line-output")]
+    public async Task<IActionResult> GetLineOutput([FromQuery] string lineCode) =>
+        await ExecuteAsync(() => _service.GetLineOutputAsync(lineCode));
 
     /// <summary>软删除 Three.js 设备绑定。</summary>
     [HttpDelete("device-bindings/{id:long}")]
@@ -103,6 +245,13 @@ public sealed class EdgeDashboardController : ControllerBase
     [HttpGet("runtime")]
     public async Task<IActionResult> GetRuntime([FromQuery] string lineCode) =>
         await ExecuteAsync(() => _service.GetLineRuntimeAsync(lineCode));
+
+    /// <summary>读取当前仍有效的 AI 建议；模型或实时数据异常时返回空。</summary>
+    [HttpGet("ai-insight")]
+    public async Task<IActionResult> GetAiInsight(
+        [FromQuery] string dashboardCode,
+        [FromQuery] string lineCode) =>
+        await ExecuteAsync(() => _insightService.GetLatestAsync(dashboardCode, lineCode));
 
     /// <summary>分页查询机械手每日运行、空闲、故障等累计时长。</summary>
     [HttpGet("daily-statistics")]
@@ -157,6 +306,12 @@ public sealed class EdgeDashboardController : ControllerBase
     public async Task<IActionResult> SaveLineConfig(
         [FromBody] EdgeDashboardLineConfigSaveDto dto) =>
         await ExecuteAsync(() => _service.SaveLineConfigAsync(dto), "线体配置已保存");
+
+    /// <summary>复制线体的场景、绑定、图表、产量和设备卡片配置到新线体。</summary>
+    [HttpPost("lines/copy")]
+    public async Task<IActionResult> CopyLineConfig(
+        [FromBody] EdgeDashboardLineCopyDto dto) =>
+        await ExecuteAsync(() => _service.CopyLineConfigAsync(dto), "线体配置已复制");
 
     /// <summary>软删除线体主配置和对应场景，保留历史统计与绑定。</summary>
     [HttpDelete("lines/{lineCode}")]

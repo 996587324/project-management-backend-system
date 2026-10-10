@@ -33,6 +33,20 @@ public interface IEdgeDashboardService
     Task<List<EdgeDashboardModelAlarmRuleOutputDto>> SaveModelAlarmRulesAsync(
         EdgeDashboardModelAlarmRuleListSaveDto dto);
 
+    /// <summary>查询或整体保存某一模型的统一字段展示映射。</summary>
+    Task<List<EdgeDashboardModelFieldDisplayMappingOutputDto>> GetModelFieldDisplayMappingsAsync(
+        string dashboardCode,
+        string modelMark);
+    Task<List<EdgeDashboardModelFieldDisplayMappingOutputDto>> SaveModelFieldDisplayMappingsAsync(
+        EdgeDashboardModelFieldDisplayMappingListSaveDto dto);
+
+    /// <summary>查询或整体保存按模型共享的状态冲突优先级。</summary>
+    Task<List<EdgeDashboardModelStatePriorityOutputDto>> GetModelStatePrioritiesAsync(
+        string dashboardCode,
+        string modelMark);
+    Task<List<EdgeDashboardModelStatePriorityOutputDto>> SaveModelStatePrioritiesAsync(
+        EdgeDashboardModelStatePriorityListSaveDto dto);
+
     /// <summary>查询一条线体已经保存的机械手绑定。</summary>
     Task<List<EdgeDashboardRobotBindingOutputDto>> GetBindingsAsync(string lineCode);
 
@@ -44,6 +58,48 @@ public interface IEdgeDashboardService
 
     /// <summary>保存 Three.js 设备的数据源和展示字段绑定。</summary>
     Task<EdgeDashboardDeviceBindingOutputDto> SaveDeviceBindingAsync(EdgeDashboardDeviceBindingSaveDto dto);
+
+    /// <summary>维护数据模型标识到业务设备名称的映射。</summary>
+    Task<List<EdgeDashboardModelDisplayMappingOutputDto>> GetModelDisplayMappingsAsync(
+        string dashboardCode);
+    Task<EdgeDashboardModelDisplayMappingOutputDto> SaveModelDisplayMappingAsync(
+        EdgeDashboardModelDisplayMappingSaveDto dto);
+    Task DeleteModelDisplayMappingAsync(long id);
+
+    /// <summary>查询设备卡片配置；lineCode 为空时返回所有线体。</summary>
+    Task<List<EdgeDashboardDeviceCardOutputDto>> GetDeviceCardsAsync(string? lineCode);
+    Task<EdgeDashboardDeviceCardOutputDto> SaveDeviceCardAsync(EdgeDashboardDeviceCardSaveDto dto);
+    Task DeleteDeviceCardAsync(long id);
+    Task<EdgeDashboardDeviceCardBoardSettingDto> SaveDeviceCardBoardSettingAsync(
+        EdgeDashboardDeviceCardBoardSettingDto dto);
+    Task<EdgeDashboardDeviceCardBoardRuntimeDto> GetDeviceCardBoardRuntimeAsync(string? lineCode);
+    Task<EdgePagedResultDto<EdgeDashboardDeviceCardChangeRecordOutputDto>> GetDeviceCardChangeRecordsAsync(
+        EdgeDashboardDeviceCardChangeQueryDto query);
+    Task<EdgePagedResultDto<EdgeDashboardDeviceCardAlertRecordOutputDto>> GetDeviceCardAlertRecordsAsync(
+        EdgeDashboardDeviceCardAlertQueryDto query);
+    Task<List<EdgeDashboardDeviceCardAlertRecordOutputDto>> ClaimDeviceCardAlertsAsync(
+        string consumerCode,
+        int maximum,
+        string? lineCode,
+        string? deviceMark,
+        string? fieldCode,
+        CancellationToken cancellationToken = default);
+    Task<int> AcknowledgeDeviceCardAlertsAsync(
+        string consumerCode,
+        IReadOnlyCollection<long> alertIds,
+        bool sent,
+        string? message,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>实时快照接收成功后按配置追踪字段变更；首次值只建立检查点。</summary>
+    Task TrackDeviceCardChangesAsync(EdgeDashboardTelemetrySampleDto sample, CancellationToken cancellationToken);
+
+    /// <summary>读取或保存一条线体的产量来源设备和字段。</summary>
+    Task<EdgeDashboardLineOutputBindingOutputDto?> GetLineOutputBindingAsync(string lineCode);
+    Task<EdgeDashboardLineOutputBindingOutputDto> SaveLineOutputBindingAsync(EdgeDashboardLineOutputBindingSaveDto dto);
+
+    /// <summary>读取当前线体根据已绑定字段累计出的当日产出。</summary>
+    Task<EdgeDashboardLineOutputDto> GetLineOutputAsync(string lineCode);
 
     /// <summary>软删除 Three.js 设备绑定。</summary>
     Task DeleteDeviceBindingAsync(long id);
@@ -90,6 +146,9 @@ public interface IEdgeDashboardService
     /// <summary>新增或修改一条看板线体主配置。</summary>
     Task<EdgeDashboardLineConfigOutputDto> SaveLineConfigAsync(
         EdgeDashboardLineConfigSaveDto dto);
+
+    /// <summary>复制线体的可编辑看板配置到新线体，不复制运行、统计、告警和追溯历史。</summary>
+    Task<EdgeDashboardLineConfigOutputDto> CopyLineConfigAsync(EdgeDashboardLineCopyDto dto);
 
     /// <summary>软删除线体主配置及对应的 Three.js 场景。</summary>
     Task DeleteLineConfigAsync(string dashboardCode, string lineCode);

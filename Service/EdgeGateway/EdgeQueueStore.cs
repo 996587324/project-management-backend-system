@@ -128,6 +128,7 @@ public class EdgeQueueStore : IEdgeQueueStore
             new EdgeLocalUploadAttemptWriteModel
             {
                 QueueId = message.Id,
+                QueueCreateTime = message.CreateTime,
                 Success = success,
                 RetryCount = retryCount,
                 AttemptTime = now,

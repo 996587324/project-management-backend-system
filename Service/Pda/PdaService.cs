@@ -139,8 +139,9 @@ public class PdaService : IPdaService
             if (!await HasPermissionAsync(user, "PdaScan")) throw new InvalidOperationException("当前账号没有 PDA 扫码权限");
 
             await ValidateDeviceAsync(deviceCode, userId);
-            rule = await ValidateBarcodeRuleAsync(barcode, scanTime, cancellationToken);
-            var handlerResult = await QueryProductBarcodeRemoteAsync(barcode, scanTime, cancellationToken);
+            var validation = await ValidateBarcodeRuleAsync(barcode, scanTime, cancellationToken);
+            rule = validation.Rule;
+            var handlerResult = validation.Result;
 
             result = new PdaScanResultDto
             {
@@ -446,7 +447,7 @@ public class PdaService : IPdaService
         return device;
     }
 
-    private async Task<PdaBarcodeRule> ValidateBarcodeRuleAsync(
+    private async Task<PdaBarcodeValidationResult> ValidateBarcodeRuleAsync(
         string barcode,
         DateTime time,
         CancellationToken cancellationToken)
@@ -462,15 +463,39 @@ public class PdaService : IPdaService
             if (rule.BarcodeLength.HasValue && barcode.Length != rule.BarcodeLength.Value) continue;
             if (!string.IsNullOrWhiteSpace(rule.Pattern) && !Regex.IsMatch(barcode, rule.Pattern)) continue;
 
-            if (NormalizeValidationSource(rule.ValidationSource) == "Remote")
+            var validationSource = NormalizeValidationSource(rule.ValidationSource);
+            if (validationSource == "Remote")
             {
                 var remoteResult = await QueryRemoteBarcodeRuleValidationAsync(barcode, time, cancellationToken);
                 if (!remoteResult.Success)
                     throw new InvalidOperationException(string.IsNullOrWhiteSpace(remoteResult.Message)
                         ? "远程条码规则校验未通过"
                         : remoteResult.Message);
+                return new PdaBarcodeValidationResult
+                {
+                    Rule = rule,
+                    Result = remoteResult
+                };
             }
-            return rule;
+
+            return new PdaBarcodeValidationResult
+            {
+                Rule = rule,
+                Result = new ProductBarcodeHandlerResult
+                {
+                    Success = true,
+                    Code = "LOCAL_RULE_VALIDATED",
+                    Message = "本地条码规则校验通过",
+                    Data = new
+                    {
+                        productBarcode = barcode,
+                        ruleCode = rule.RuleCode,
+                        ruleName = rule.RuleName,
+                        validationSource,
+                        validationTime = time.ToString("yyyy-MM-dd HH:mm:ss")
+                    }
+                }
+            };
         }
 
         throw new InvalidOperationException("产品条码不符合已启用规则");
@@ -510,54 +535,6 @@ public class PdaService : IPdaService
                 Data = new { productBarcode = barcode }
             };
         }
-        return AdaptRemoteResponse(text, barcode);
-    }
-
-    private async Task<ProductBarcodeHandlerResult> QueryProductBarcodeRemoteAsync(string barcode, DateTime time, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(_pdaOptions.ProductBarcodeQueryUrl))
-        {
-            return new ProductBarcodeHandlerResult
-            {
-                Success = true,
-                Code = "MOCK_PRODUCT_BARCODE",
-                Message = "产品条码查询接口未配置，已返回占位结果",
-                Data = new
-                {
-                    productBarcode = barcode,
-                    queryTime = time.ToString("yyyy-MM-dd HH:mm:ss"),
-                    status = "待接入业务接口"
-                }
-            };
-        }
-
-        var client = _httpClientFactory.CreateClient();
-        client.Timeout = TimeSpan.FromSeconds(Math.Clamp(_pdaOptions.ProductBarcodeTimeoutSeconds, 1, 60));
-        using var request = new HttpRequestMessage(HttpMethod.Post, _pdaOptions.ProductBarcodeQueryUrl)
-        {
-            Content = new StringContent(JsonConvert.SerializeObject(new
-            {
-                productBarcode = barcode,
-                time = time.ToString("o")
-            }), Encoding.UTF8, "application/json")
-        };
-
-        if (!string.IsNullOrWhiteSpace(_pdaOptions.ProductBarcodeApiKey))
-            request.Headers.TryAddWithoutValidation("Authorization", _pdaOptions.ProductBarcodeApiKey);
-
-        using var response = await client.SendAsync(request, cancellationToken);
-        var text = await response.Content.ReadAsStringAsync(cancellationToken);
-        if (!response.IsSuccessStatusCode)
-        {
-            return new ProductBarcodeHandlerResult
-            {
-                Success = false,
-                Code = $"HTTP_{(int)response.StatusCode}",
-                Message = $"产品条码接口返回异常：{(int)response.StatusCode}",
-                Data = new { productBarcode = barcode }
-            };
-        }
-
         return AdaptRemoteResponse(text, barcode);
     }
 
@@ -766,5 +743,11 @@ public class PdaService : IPdaService
         public string Code { get; init; } = string.Empty;
         public string Message { get; init; } = string.Empty;
         public object? Data { get; init; }
+    }
+
+    private sealed class PdaBarcodeValidationResult
+    {
+        public PdaBarcodeRule Rule { get; init; } = new();
+        public ProductBarcodeHandlerResult Result { get; init; } = new();
     }
 }

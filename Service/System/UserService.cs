@@ -24,9 +24,6 @@ namespace Service
         }
         public UserRes GetUser(string userName, string password)
         {
-            _db.GetConnection("calmadmin").CodeFirst.SetStringDefaultLength(200)
-                .InitTables(typeof(SysUserInfo), typeof(SysRole));
-
             var account = _db.GetConnection("calmadmin").Queryable<SysUserInfo>()
                 .Where(u => u.UserName == userName && u.Password == password && u.Enabled)
                 .First();

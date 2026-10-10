@@ -1,6 +1,7 @@
 using System.Text;
 using AutoMapper;
 using Interface;
+using Microsoft.Extensions.Logging;
 using Model.EdgeGateway;
 using Newtonsoft.Json;
 using SqlSugar;
@@ -14,24 +15,29 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
 {
     private const int MaxDataListCount = 500;
     private const int MaxPayloadBytes = 1024 * 1024;
-    private static readonly SemaphoreSlim UpsertGate = new(1, 1);
     private readonly SqlSugarScope _dbScope;
     private readonly IMapper _mapper;
     private readonly IEdgeGatewayFeatureService _featureService;
     private readonly IEdgeDashboardTelemetryProcessor _telemetryProcessor;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private readonly IEdgeDashboardService _dashboardService;
+    private readonly ILogger<EdgeRealtimeDataService> _logger;
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     /// <summary>通过 IOC 注入项目现有 SqlSugarScope、AutoMapper 和全局功能开关。</summary>
     public EdgeRealtimeDataService(
         SqlSugarScope dbScope,
         IMapper mapper,
         IEdgeGatewayFeatureService featureService,
-        IEdgeDashboardTelemetryProcessor telemetryProcessor)
+        IEdgeDashboardTelemetryProcessor telemetryProcessor,
+        IEdgeDashboardService dashboardService,
+        ILogger<EdgeRealtimeDataService> logger)
     {
         _dbScope = dbScope;
         _mapper = mapper;
         _featureService = featureService;
         _telemetryProcessor = telemetryProcessor;
+        _dashboardService = dashboardService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -41,6 +47,7 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
         EdgeRealtimeDataReceiveDto dto,
         CancellationToken cancellationToken)
     {
+        using var operation = DatabaseOperationScope.Begin(_dbScope);
         await _featureService.EnsureEnabledAsync();
         var normalized = NormalizeAndValidate(dto);
 
@@ -65,56 +72,91 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
             throw new InvalidOperationException("data JSON 不能超过 1 MB");
 
         EdgeRealtimeReceiveResultDto result;
-        await UpsertGate.WaitAsync(cancellationToken);
+        EdgeDashboardTelemetrySampleDto telemetrySample;
+        Dictionary<string, object?> currentData;
+        await EdgeRealtimeFieldLatestStore.WriteGate.WaitAsync(cancellationToken);
         try
         {
             var existing = await Db.Queryable<EdgeRealtimeDeviceSnapshotEntity>().FirstAsync(x =>
                 x.TenantMark == normalized.TenantMark &&
                 x.DeviceCode == normalized.DeviceCode);
-            if (existing != null && dataTime < existing.DataTime)
+            var older = existing != null && (snapshot.SourceTimestamp.HasValue && existing.SourceTimestamp.HasValue
+                ? snapshot.SourceTimestamp.Value < existing.SourceTimestamp.Value
+                : dataTime < existing.DataTime);
+            if (older)
             {
                 return new EdgeRealtimeReceiveResultDto
                 {
-                    SnapshotId = existing.Id,
+                    SnapshotId = existing!.Id,
                     IgnoredOlderCount = 1,
                     DataTime = existing.DataTime,
                     ReceiveTime = existing.ReceiveTime
                 };
             }
 
-            if (existing == null)
+            // 增量报文可以省略模型元信息，不能因此清掉已确定的设备模型。
+            snapshot.ModelMark ??= existing?.ModelMark;
+            snapshot.DataType ??= existing?.DataType;
+            await Db.Ado.BeginTranAsync();
+            try
             {
-                snapshot.CreateTime = receiveTime;
-                snapshot.UpdateTime = receiveTime;
-                snapshot.Id = await Db.Insertable(snapshot).ExecuteReturnBigIdentityAsync();
-                result = BuildResult(snapshot, inserted: true);
+                currentData = await EdgeRealtimeFieldLatestStore.ApplyAsync(Db, snapshot, existing);
+                telemetrySample = new EdgeDashboardTelemetrySampleDto
+                {
+                    DeviceMark = normalized.DeviceCode,
+                    ModelMark = snapshot.ModelMark,
+                    DataType = snapshot.DataType,
+                    TenantMark = normalized.TenantMark ?? string.Empty,
+                    MessageId = normalized.MessageId,
+                    SourceTimestamp = normalized.SourceTimestamp,
+                    Data = currentData,
+                    ReportedData = normalized.DataList.First().Data,
+                    DataTime = dataTime,
+                    ReceiveTime = receiveTime
+                };
+                // 只在接收事务内生成任务；微信网络请求由后台独立发送。
+                await EdgeDeviceCardPushService.CaptureAsync(Db, telemetrySample, cancellationToken);
+                if (existing == null)
+                {
+                    snapshot.CreateTime = receiveTime;
+                    snapshot.UpdateTime = receiveTime;
+                    snapshot.Id = await Db.Insertable(snapshot).ExecuteReturnBigIdentityAsync();
+                    result = BuildResult(snapshot, inserted: true);
+                }
+                else
+                {
+                    snapshot.Id = existing.Id;
+                    snapshot.CreateTime = existing.CreateTime;
+                    await Db.Updateable(snapshot).ExecuteCommandAsync();
+                    result = BuildResult(snapshot, inserted: false);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                await Db.Ado.CommitTranAsync();
             }
-            else
+            catch
             {
-                snapshot.Id = existing.Id;
-                snapshot.CreateTime = existing.CreateTime;
-                await Db.Updateable(snapshot).ExecuteCommandAsync();
-                result = BuildResult(snapshot, inserted: false);
+                await Db.Ado.RollbackTranAsync();
+                throw;
             }
         }
         finally
         {
-            UpsertGate.Release();
+            EdgeRealtimeFieldLatestStore.WriteGate.Release();
         }
 
         // 快照保存成功后再推进看板统计；失败会返回给上报方重试，原快照仍保持幂等覆盖。
-        await _telemetryProcessor.ProcessAsync(new EdgeDashboardTelemetrySampleDto
+        await _telemetryProcessor.ProcessAsync(telemetrySample, cancellationToken);
+
+        // 追溯配置错误不能阻断上游数据接收；快照已持久化，下一条数据仍可继续生成追溯记录。
+        try
         {
-            DeviceMark = normalized.DeviceCode,
-            ModelMark = normalized.ModelMark,
-            DataType = normalized.DataType,
-            TenantMark = normalized.TenantMark ?? string.Empty,
-            MessageId = normalized.MessageId,
-            SourceTimestamp = normalized.SourceTimestamp,
-            Data = normalized.DataList.First().Data,
-            DataTime = dataTime,
-            ReceiveTime = receiveTime
-        }, cancellationToken);
+            await _dashboardService.TrackDeviceCardChangesAsync(telemetrySample, cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "记录设备卡片字段变更失败。Tenant: {TenantMark}, Device: {DeviceMark}",
+                telemetrySample.TenantMark, telemetrySample.DeviceMark);
+        }
         return result;
     }
 

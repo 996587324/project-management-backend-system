@@ -521,7 +521,8 @@ public class AgentModelClient : IAgentModelClient
             Model = runtime.Model,
             Success = success,
             StatusCode = statusCode,
-            BusinessCode = businessCode,
+            // AgentModelInvocationLog 的历史列为 NOT NULL；0 明确表示平台没有返回业务码。
+            BusinessCode = businessCode ?? 0,
             ErrorMessage = Truncate(errorMessage, 1000),
             TraceId = traceId,
             ActualModel = actualModel,

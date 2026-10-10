@@ -48,6 +48,7 @@ public class QueueMessage
     public string MessageId { get; set; } = string.Empty;
     public string PayloadJson { get; set; } = string.Empty;
     public int RetryCount { get; set; }
+    public DateTime CreateTime { get; set; }
 }
 
 /// <summary>边缘节点本地队列状态统计。</summary>

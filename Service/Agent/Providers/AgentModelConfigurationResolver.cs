@@ -12,7 +12,7 @@ public sealed class AgentModelConfigurationResolver : IAgentModelConfigurationRe
     private readonly SqlSugarScope _dbScope;
     private readonly IAgentSecretProtector _secretProtector;
     private readonly IAgentModelDatabaseInitializer _initializer;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     public AgentModelConfigurationResolver(
         SqlSugarScope dbScope,

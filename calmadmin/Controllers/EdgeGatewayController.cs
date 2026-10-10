@@ -1,6 +1,9 @@
 using Interface;
 using Microsoft.AspNetCore.Mvc;
 using Model.EdgeGateway;
+using Model.User;
+using SqlSugar;
+using System.Security.Claims;
 
 namespace calmadmin.Controllers;
 
@@ -16,6 +19,8 @@ public class EdgeGatewayController : ControllerBase
     private readonly IEdgeBPayloadTemplateService _bPayloadTemplateService;
     private readonly IEdgeBAutoForwardService _bAutoForwardService;
     private readonly IEdgeGatewayFeatureService _featureService;
+    private readonly IEdgeDataTraceService _dataTraceService;
+    private readonly SqlSugarScope _dbScope;
     private readonly string? _machineApiKey;
 
     public EdgeGatewayController(
@@ -24,6 +29,8 @@ public class EdgeGatewayController : ControllerBase
         IEdgeBPayloadTemplateService bPayloadTemplateService,
         IEdgeBAutoForwardService bAutoForwardService,
         IEdgeGatewayFeatureService featureService,
+        IEdgeDataTraceService dataTraceService,
+        SqlSugarScope dbScope,
         IConfiguration configuration)
     {
         _service = service;
@@ -31,6 +38,8 @@ public class EdgeGatewayController : ControllerBase
         _bPayloadTemplateService = bPayloadTemplateService;
         _bAutoForwardService = bAutoForwardService;
         _featureService = featureService;
+        _dataTraceService = dataTraceService;
+        _dbScope = dbScope;
         _machineApiKey = configuration["EdgeGateway:ApiKey"];
     }
 
@@ -239,6 +248,90 @@ public class EdgeGatewayController : ControllerBase
     public async Task<IActionResult> GetWebSocketReceiveRecords([FromQuery] EdgeWebSocketReceiveRecordQueryDto query) =>
         Success(await _service.GetWebSocketReceiveRecordPageAsync(query));
 
+    /// <summary>获取数据追溯全局设置。</summary>
+    [HttpGet("data-trace/setting")]
+    public async Task<IActionResult> GetDataTraceSetting() => Success(await _dataTraceService.GetSettingAsync());
+
+    /// <summary>保存数据追溯保留时长和启停状态。</summary>
+    [HttpPost("data-trace/setting")]
+    public async Task<IActionResult> SaveDataTraceSetting([FromBody] EdgeDataTraceSettingSaveDto dto)
+    {
+        if (!await IsAdministratorAsync()) return Error("仅管理员可以修改数据追溯设置", 403);
+        return await ExecuteAsync(() => _dataTraceService.SaveSettingAsync(dto, GetOperatorName()), "数据追溯设置已保存");
+    }
+
+    /// <summary>查询数据追溯规则。</summary>
+    [HttpGet("data-trace/rules")]
+    public async Task<IActionResult> GetDataTraceRules() => Success(await _dataTraceService.GetRulesAsync());
+
+    /// <summary>新增或修改数据追溯规则。</summary>
+    [HttpPost("data-trace/rules")]
+    public async Task<IActionResult> SaveDataTraceRule([FromBody] EdgeDataTraceRuleSaveDto dto)
+    {
+        if (!await IsAdministratorAsync()) return Error("仅管理员可以维护数据追溯规则", 403);
+        return await ExecuteAsync(() => _dataTraceService.SaveRuleAsync(dto, GetOperatorName()), "数据追溯规则已保存");
+    }
+
+    /// <summary>物理删除追溯规则及其当前最新值快照，历史点按保留周期自然清理。</summary>
+    [HttpPost("data-trace/rules/{id:int}/delete")]
+    public async Task<IActionResult> DeleteDataTraceRule(int id)
+    {
+        if (!await IsAdministratorAsync()) return Error("仅管理员可以维护数据追溯规则", 403);
+        return await ExecuteAsync(() => _dataTraceService.DeleteRuleAsync(id, GetOperatorName()), "数据追溯规则已删除");
+    }
+
+    /// <summary>查询可用于曲线选择的设备、数据源、来源设备和参数树。</summary>
+    [HttpGet("data-trace/tree")]
+    public async Task<IActionResult> GetDataTraceTree() => Success(await _dataTraceService.GetTreeAsync());
+
+    /// <summary>查询曲线趋势数据；服务端自动压缩过密采样点。</summary>
+    [HttpPost("data-trace/trend")]
+    public async Task<IActionResult> GetDataTraceTrend([FromBody] EdgeDataTraceTrendQueryDto dto) =>
+        await ExecuteAsync(() => _dataTraceService.GetTrendAsync(dto));
+
+    /// <summary>按游标分页查询参数原始历史点，避免一次加载大量记录。</summary>
+    [HttpPost("data-trace/detail")]
+    public async Task<IActionResult> GetDataTraceDetail([FromBody] EdgeDataTraceDetailQueryDto dto) =>
+        await ExecuteAsync(() => _dataTraceService.GetDetailAsync(dto));
+
+    /// <summary>查询参数统计摘要。</summary>
+    [HttpPost("data-trace/summaries")]
+    public async Task<IActionResult> GetDataTraceSummaries([FromBody] EdgeDataTraceDetailQueryDto dto) =>
+        await ExecuteAsync(() => _dataTraceService.GetSummariesAsync(dto));
+
+    /// <summary>创建后台数据追溯导出任务。</summary>
+    [HttpPost("data-trace/exports")]
+    public async Task<IActionResult> CreateDataTraceExport([FromBody] EdgeDataTraceExportRequestDto dto) =>
+        await ExecuteAsync(() => _dataTraceService.CreateExportTaskAsync(dto, GetOperatorName()), "导出任务已创建");
+
+    /// <summary>查询导出任务进度。</summary>
+    [HttpGet("data-trace/exports/{id:long}")]
+    public async Task<IActionResult> GetDataTraceExport(long id)
+    {
+        var task = await _dataTraceService.GetExportTaskAsync(id);
+        return task == null ? Error("导出任务不存在", 404) : Success(task);
+    }
+
+    /// <summary>下载已完成且未过期的导出文件。</summary>
+    [HttpGet("data-trace/exports/{id:long}/file")]
+    public async Task<IActionResult> DownloadDataTraceExport(long id)
+    {
+        try
+        {
+            var file = await _dataTraceService.OpenExportFileAsync(
+                id,
+                GetOperatorName(),
+                await IsAdministratorAsync());
+            if (file == null) return Error("导出文件未完成、已过期或不存在", 404);
+            Response.Headers["X-Accel-Buffering"] = "no";
+            var contentType = file.FileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                ? "application/zip"
+                : "text/csv; charset=utf-8";
+            return File(file.Content, contentType, file.FileName);
+        }
+        catch (InvalidOperationException ex) { return Error(ex.Message, 403); }
+    }
+
     /// <summary>接收边缘节点上报的 WebSocket 报文发送结果。</summary>
     [HttpPost("websocket-send-records")]
     public async Task<IActionResult> ReportWebSocketSendRecord([FromBody] EdgeWebSocketSendRecordReportDto dto)
@@ -351,6 +444,45 @@ public class EdgeGatewayController : ControllerBase
         return Request.Headers.TryGetValue("X-Edge-Api-Key", out var value) && value == _machineApiKey
             ? null
             : Error("边缘设备认证失败", 401);
+    }
+
+    private string? GetOperatorName() => User.Identity?.Name ?? User.FindFirst("UserName")?.Value;
+
+    /// <summary>
+    /// 数据追溯属于后台配置，管理员身份以数据库中的当前账号配置为准，
+    /// 不依赖登录时签发的 JWT 角色声明，避免角色刚调整后仍被旧 Token 拦截。
+    /// </summary>
+    private async Task<bool> IsAdministratorAsync()
+    {
+        var identifiers = new[]
+            {
+                User.FindFirst("Id")?.Value,
+                User.FindFirst(ClaimTypes.NameIdentifier)?.Value,
+                User.Identity?.Name,
+                User.FindFirst("Name")?.Value,
+                User.FindFirst(ClaimTypes.Name)?.Value
+            }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (identifiers.Count == 0) return false;
+
+        var db = _dbScope.GetConnectionScope("calmadmin");
+        foreach (var identifier in identifiers)
+        {
+            var user = await db.Queryable<SysUserInfo>()
+                .FirstAsync(x => x.Enabled && (x.UserId == identifier || x.UserName == identifier));
+            if (user == null) continue;
+
+            return user.RoleList.Any(role =>
+                       role.Trim().Equals("R_ADMIN", StringComparison.OrdinalIgnoreCase) ||
+                       role.Trim().Equals("R_SUPER", StringComparison.OrdinalIgnoreCase)) ||
+                   user.PermissionKeyList.Any(permission => permission.Trim() == "*");
+        }
+
+        return false;
     }
 
     /// <summary>执行中心业务并把可预期的参数错误转换为 400 业务响应。</summary>

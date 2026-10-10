@@ -27,15 +27,17 @@ namespace Service
         /// <param name="user"></param>
         /// <returns></returns>
         /// <exception cref="NotImplementedException"></exception>
-        public string GetToken(UserRes user)
+        public string GetToken(UserRes user, string? sessionId = null)
         {
             #region 有效载荷
-            var claims = new[]
+            var claims = new List<Claim>
             {
-                    new Claim("Id",user.Id.ToString()),
-                    new Claim("Name",user.Name),
-                    new Claim("UserType",user.UserType.ToString()),
-                };
+                new("Id", user.Id.ToString()),
+                new("Name", user.Name),
+                new("UserType", user.UserType.ToString()),
+                new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N"))
+            };
+            if (!string.IsNullOrWhiteSpace(sessionId)) claims.Add(new Claim("SessionId", sessionId));
 
             //需要加密：需要加密key:
             //Nuget引入：Microsoft.IdentityModel.Tokens

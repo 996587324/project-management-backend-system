@@ -11,7 +11,7 @@ namespace Interface
     public interface ICustomJWTService
     {
         //获取token
-        string GetToken(UserRes user);
+        string GetToken(UserRes user, string? sessionId = null);
         string GenerateRefreshToken();
     }
 }

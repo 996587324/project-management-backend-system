@@ -86,7 +86,7 @@ public class EdgeLocalRuleVersionEntity
     public DateTime CreateTime { get; set; } = DateTime.UtcNow;
 }
 
-/// <summary>边缘 SQLite 可靠上传队列。</summary>
+/// <summary>边缘 SQLite 可靠上传队列。数据库文件按天拆分，表名保持不变。</summary>
 [SugarTable("message_queue")]
 public class EdgeLocalMessageQueueEntity
 {
@@ -113,6 +113,31 @@ public class EdgeLocalMessageQueueEntity
     [SugarColumn(ColumnName = "upload_time", IsNullable = true)]
     public DateTime? UploadTime { get; set; }
 }
+
+/// <summary>记录某个本地上传队列日表是否已全部上传，已完成的日表不再进入读取范围。</summary>
+[SugarTable("queue_day_status")]
+public class EdgeLocalQueueDayStatusEntity
+{
+    [SugarColumn(ColumnName = "day_key", IsPrimaryKey = true, Length = 8)]
+    public string DayKey { get; set; } = string.Empty;
+    [SugarColumn(ColumnName = "upload_completed")]
+    public bool UploadCompleted { get; set; }
+    [SugarColumn(ColumnName = "completed_time", IsNullable = true)]
+    public DateTime? CompletedTime { get; set; }
+    [SugarColumn(ColumnName = "update_time")]
+    public DateTime UpdateTime { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>本地结构迁移标记，避免旧单表数据在服务重启后重复迁移。</summary>
+[SugarTable("local_storage_migration")]
+public class EdgeLocalStorageMigrationEntity
+{
+    [SugarColumn(ColumnName = "migration_key", IsPrimaryKey = true, Length = 64)]
+    public string MigrationKey { get; set; } = string.Empty;
+    [SugarColumn(ColumnName = "completed_time")]
+    public DateTime CompletedTime { get; set; } = DateTime.UtcNow;
+}
+
 
 /// <summary>边缘 SQLite 中每次中心上传尝试的结果记录。</summary>
 [SugarTable("upload_record")]

@@ -22,6 +22,8 @@ public class EdgeLocalConfigurationWriteModel
 public class EdgeLocalUploadAttemptWriteModel
 {
     public int QueueId { get; set; }
+    /// <summary>用于定位消息所属的 edge-gateway-yyyyMMdd.db 日数据库文件。</summary>
+    public DateTime QueueCreateTime { get; set; }
     public bool Success { get; set; }
     public int RetryCount { get; set; }
     public DateTime AttemptTime { get; set; }

@@ -13,7 +13,6 @@ public class RoleService : IRoleService
 
     public async Task<RolePageData> GetRolePageListAsync(int current, int size)
     {
-        await EnsureRoleTableAsync();
         RefAsync<int> total = 0;
         var records = await _db.GetConnection("calmadmin").Queryable<SysRole>()
             .OrderBy(x => x.roleId)
@@ -37,7 +36,6 @@ public class RoleService : IRoleService
 
     public async Task<RolePageData> CreateRoleAsync(SysRole role)
     {
-        await EnsureRoleTableAsync();
         var exists = await _db.GetConnection("calmadmin").Queryable<SysRole>()
             .AnyAsync(x => x.roleCode == role.roleCode);
         if (exists) throw new Exception("角色编码已存在");
@@ -51,7 +49,6 @@ public class RoleService : IRoleService
 
     public async Task<RolePageData> UpdateRoleAsync(SysRole role)
     {
-        await EnsureRoleTableAsync();
         var existRole = await _db.GetConnection("calmadmin").Queryable<SysRole>()
             .Where(r => r.roleId == role.roleId)
             .FirstAsync();
@@ -70,7 +67,6 @@ public class RoleService : IRoleService
 
     public async Task<bool> DeleteRoleAsync(int roleId)
     {
-        await EnsureRoleTableAsync();
         var role = await _db.GetConnection("calmadmin").Queryable<SysRole>()
             .FirstAsync(x => x.roleId == roleId);
         if (role == null) return false;
@@ -86,14 +82,12 @@ public class RoleService : IRoleService
 
     public async Task<SysRole?> GetRolePermissionAsync(int roleId)
     {
-        await EnsureRoleTableAsync();
         return await _db.GetConnection("calmadmin").Queryable<SysRole>()
             .FirstAsync(x => x.roleId == roleId);
     }
 
     public async Task<bool> SaveRolePermissionAsync(RolePermissionSaveDto input)
     {
-        await EnsureRoleTableAsync();
         var role = await _db.GetConnection("calmadmin").Queryable<SysRole>()
             .FirstAsync(x => x.roleId == input.roleId || x.roleCode == input.roleCode);
         if (role == null) throw new Exception("角色不存在");
@@ -103,27 +97,4 @@ public class RoleService : IRoleService
         return await _db.GetConnection("calmadmin").Updateable(role).ExecuteCommandAsync() > 0;
     }
 
-    private async Task EnsureRoleTableAsync()
-    {
-        _db.GetConnection("calmadmin").CodeFirst.SetStringDefaultLength(200).InitTables(typeof(SysRole));
-
-        var defaults = new[]
-        {
-            new SysRole { roleName = "管理员", roleCode = "R_ADMIN", description = "系统管理员，拥有全部权限", permissionKeys = "*", enabled = true },
-            new SysRole { roleName = "工程师", roleCode = "R_ENGINEER", description = "工程师角色，后续可扩展为工艺/设备/品质工程师", permissionKeys = "Dashboard,ProjectDashboard,ProjectLedger,TaskBoard,ProjectFile,Agent,AgentExecutor,AgentModelProvider", enabled = true },
-            new SysRole { roleName = "普通用户", roleCode = "R_USER", description = "普通用户，仅保留基础工作台和个人权限", permissionKeys = "Dashboard", enabled = true }
-        };
-
-        foreach (var role in defaults)
-        {
-            var exists = await _db.GetConnection("calmadmin").Queryable<SysRole>()
-                .AnyAsync(x => x.roleCode == role.roleCode);
-            if (!exists)
-            {
-                role.createTime = DateTime.Now;
-                role.updateTime = DateTime.Now;
-                await _db.GetConnection("calmadmin").Insertable(role).ExecuteCommandAsync();
-            }
-        }
-    }
 }

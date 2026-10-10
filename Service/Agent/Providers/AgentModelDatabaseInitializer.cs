@@ -12,7 +12,7 @@ public sealed class AgentModelDatabaseInitializer : IAgentModelDatabaseInitializ
     private readonly SqlSugarScope _dbScope;
     private readonly SemaphoreSlim _initializeLock = new(1, 1);
     private bool _initialized;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     public AgentModelDatabaseInitializer(SqlSugarScope dbScope)
     {

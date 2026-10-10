@@ -19,7 +19,7 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
     private const string UnclassifiedModelMark = "__UNCLASSIFIED__";
     private readonly SqlSugarScope _dbScope;
     private readonly ILogger<EdgeDashboardTelemetryProcessor> _logger;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     /// <summary>通过 IOC 获取项目现有 SqlSugarScope 和日志组件。</summary>
     public EdgeDashboardTelemetryProcessor(
@@ -35,36 +35,64 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         EdgeDashboardTelemetrySampleDto sample,
         CancellationToken cancellationToken)
     {
+        using var operation = DatabaseOperationScope.Begin(_dbScope);
         await ProcessingGate.WaitAsync(cancellationToken);
         try
         {
             var modelMark = NormalizeModelMark(sample.ModelMark);
             var envelope = EdgeDashboardJsonFieldResolver.BuildEnvelope(sample);
-            await RecordModelFieldsAsync(modelMark, envelope, sample);
+            await RecordModelFieldsAsync(modelMark, EdgeDashboardJsonFieldResolver.BuildReportedEnvelope(sample), sample);
 
             var bindings = await Db.Queryable<EdgeDashboardRobotBindingEntity>()
                 .Where(x => x.IsDelete == 0 && x.Enabled &&
                             x.TenantMark == sample.TenantMark &&
                             x.DeviceMark == sample.DeviceMark)
                 .ToListAsync();
-            if (bindings.Count == 0) return;
+            var deviceBindings = await Db.Queryable<EdgeDashboardDeviceBindingEntity>()
+                .Where(x => x.IsDelete == 0 && x.Enabled && x.StatisticsEnabled &&
+                            x.TenantMark == sample.TenantMark &&
+                            x.SourceDeviceMark == sample.DeviceMark)
+                .ToListAsync();
+            var outputBindings = await Db.Queryable<EdgeDashboardLineOutputBindingEntity>()
+                .Where(x => x.IsDelete == 0 && x.Enabled &&
+                            x.TenantMark == sample.TenantMark &&
+                            x.DeviceMark == sample.DeviceMark)
+                .ToListAsync();
+            if (bindings.Count == 0 && deviceBindings.Count == 0 && outputBindings.Count == 0) return;
 
+            foreach (var outputBinding in outputBindings)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await ProcessLineOutputBindingAsync(outputBinding, envelope, sample);
+            }
             var bindingIds = bindings.Select(x => x.Id).ToList();
-            var dashboardCodes = bindings
-                .Select(x => x.DashboardCode)
+            var dashboardCodes = bindings.Select(x => x.DashboardCode)
+                .Concat(deviceBindings.Select(x => x.DashboardCode))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            var rules = await Db.Queryable<EdgeDashboardRobotStateRuleEntity>()
-                .Where(x => bindingIds.Contains(x.RobotBindingId) &&
-                            x.IsDelete == 0 && x.Enabled)
-                .OrderBy(x => x.Priority)
-                .ToListAsync();
-            var modelAlarmRules = await Db.Queryable<EdgeDashboardModelAlarmRuleEntity>()
-                .Where(x => dashboardCodes.Contains(x.DashboardCode) &&
-                            x.ModelMark == modelMark &&
-                            x.IsDelete == 0 && x.Enabled)
-                .OrderBy(x => x.Priority)
-                .ToListAsync();
+            var rules = bindingIds.Count == 0
+                ? []
+                : await Db.Queryable<EdgeDashboardRobotStateRuleEntity>()
+                    .Where(x => bindingIds.Contains(x.RobotBindingId) &&
+                                x.IsDelete == 0 && x.Enabled)
+                    .OrderBy(x => x.Priority)
+                    .ToListAsync();
+            var modelAlarmRules = dashboardCodes.Count == 0
+                ? []
+                : await Db.Queryable<EdgeDashboardModelAlarmRuleEntity>()
+                    .Where(x => dashboardCodes.Contains(x.DashboardCode) &&
+                                x.ModelMark == modelMark &&
+                                x.IsDelete == 0 && x.Enabled)
+                    .OrderBy(x => x.Priority)
+                    .ToListAsync();
+            var modelStatePriorities = dashboardCodes.Count == 0
+                ? []
+                : await Db.Queryable<EdgeDashboardModelStatePriorityEntity>()
+                    .Where(x => dashboardCodes.Contains(x.DashboardCode) &&
+                                x.ModelMark == modelMark &&
+                                x.IsDelete == 0)
+                    .ToListAsync();
             foreach (var binding in bindings)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -72,6 +100,17 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
                     binding,
                     rules.Where(x => x.RobotBindingId == binding.Id).ToList(),
                     modelAlarmRules.Where(x => x.DashboardCode == binding.DashboardCode).ToList(),
+                    modelStatePriorities.Where(x => x.DashboardCode == binding.DashboardCode).ToList(),
+                    envelope,
+                    sample);
+            }
+            foreach (var binding in deviceBindings)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await ProcessDeviceBindingAsync(
+                    binding,
+                    modelAlarmRules.Where(x => x.DashboardCode == binding.DashboardCode).ToList(),
+                    modelStatePriorities.Where(x => x.DashboardCode == binding.DashboardCode).ToList(),
                     envelope,
                     sample);
             }
@@ -85,6 +124,7 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
     /// <summary>定时把超过在线阈值的机械手推进为离线，并持续累计离线秒数。</summary>
     public async Task SweepOfflineAsync(DateTime now, CancellationToken cancellationToken)
     {
+        using var operation = DatabaseOperationScope.Begin(_dbScope);
         await ProcessingGate.WaitAsync(cancellationToken);
         try
         {
@@ -92,13 +132,18 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
             var bindings = await db.Queryable<EdgeDashboardRobotBindingEntity>()
                 .Where(x => x.IsDelete == 0 && x.Enabled)
                 .ToListAsync();
-            if (bindings.Count == 0) return;
+            var deviceBindings = await db.Queryable<EdgeDashboardDeviceBindingEntity>()
+                .Where(x => x.IsDelete == 0 && x.Enabled && x.StatisticsEnabled)
+                .ToListAsync();
+            if (bindings.Count == 0 && deviceBindings.Count == 0) return;
 
             var bindingMap = bindings.ToDictionary(x => x.Id);
             var bindingIds = bindingMap.Keys.ToList();
-            var runtimeStates = await db.Queryable<EdgeDashboardRobotRuntimeStateEntity>()
-                .Where(x => bindingIds.Contains(x.RobotBindingId))
-                .ToListAsync();
+            var runtimeStates = bindingIds.Count == 0
+                ? []
+                : await db.Queryable<EdgeDashboardRobotRuntimeStateEntity>()
+                    .Where(x => bindingIds.Contains(x.RobotBindingId))
+                    .ToListAsync();
             foreach (var runtime in runtimeStates)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -134,6 +179,56 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
                             now,
                             db);
                         await CloseActiveFaultsAsync(binding.Id, offlineStart, null, db);
+                        runtime.CurrentState = EdgeDashboardConstants.Offline;
+                        runtime.StateStartTime = offlineStart;
+                    }
+                }
+
+                runtime.LastAccountedTime = now;
+                runtime.UpdateTime = now;
+                await db.Updateable(runtime).ExecuteCommandAsync();
+            }
+
+            var deviceBindingMap = deviceBindings.ToDictionary(x => x.Id);
+            var deviceBindingIds = deviceBindingMap.Keys.ToList();
+            var deviceRuntimeStates = deviceBindingIds.Count == 0
+                ? []
+                : await db.Queryable<EdgeDashboardDeviceRuntimeStateEntity>()
+                    .Where(x => deviceBindingIds.Contains(x.DeviceBindingId))
+                    .ToListAsync();
+            foreach (var runtime in deviceRuntimeStates)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!deviceBindingMap.TryGetValue(runtime.DeviceBindingId, out var binding) ||
+                    now <= runtime.LastAccountedTime)
+                    continue;
+
+                var offlineStart = runtime.LastSampleTime.AddSeconds(binding.OnlineTimeoutSeconds);
+                if (runtime.CurrentState == EdgeDashboardConstants.Offline)
+                {
+                    await AddDeviceDurationAsync(
+                        binding,
+                        EdgeDashboardConstants.Offline,
+                        runtime.LastAccountedTime,
+                        now,
+                        db);
+                }
+                else
+                {
+                    await AddDeviceDurationAsync(
+                        binding,
+                        runtime.CurrentState,
+                        runtime.LastAccountedTime,
+                        Min(now, offlineStart),
+                        db);
+                    if (now > offlineStart)
+                    {
+                        await AddDeviceDurationAsync(
+                            binding,
+                            EdgeDashboardConstants.Offline,
+                            Max(runtime.LastAccountedTime, offlineStart),
+                            now,
+                            db);
                         runtime.CurrentState = EdgeDashboardConstants.Offline;
                         runtime.StateStartTime = offlineStart;
                     }
@@ -216,8 +311,27 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
             });
         }
 
-        foreach (var chunk in updates.Chunk(500))
-            await Db.Updateable(chunk.ToList()).ExecuteCommandAsync();
+        // SQL Server BulkCopy + 固定结构的批量更新，避免每条报文生成包含变化值的 UNION ALL SQL。
+        // 保留逐条数据的计数、最新值及时间语义，不采用延迟刷盘。
+        var updateColumns = new[]
+        {
+            nameof(EdgeDashboardModelFieldCatalogEntity.FieldName),
+            nameof(EdgeDashboardModelFieldCatalogEntity.ValueType),
+            nameof(EdgeDashboardModelFieldCatalogEntity.LastValueJson),
+            nameof(EdgeDashboardModelFieldCatalogEntity.SampleTenantMark),
+            nameof(EdgeDashboardModelFieldCatalogEntity.SampleDeviceMark),
+            nameof(EdgeDashboardModelFieldCatalogEntity.SeenCount),
+            nameof(EdgeDashboardModelFieldCatalogEntity.IsDelete),
+            nameof(EdgeDashboardModelFieldCatalogEntity.LastSeenTime),
+            nameof(EdgeDashboardModelFieldCatalogEntity.UpdateTime)
+        };
+        foreach (var chunk in updates.Chunk(200))
+        {
+            await Db.Fastest<EdgeDashboardModelFieldCatalogEntity>().BulkUpdateAsync(
+                chunk.ToList(),
+                new[] { nameof(EdgeDashboardModelFieldCatalogEntity.Id) },
+                updateColumns);
+        }
         foreach (var chunk in inserts.Chunk(500))
             await Db.Insertable(chunk.ToList()).ExecuteCommandAsync();
     }
@@ -227,6 +341,7 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         EdgeDashboardRobotBindingEntity binding,
         IReadOnlyCollection<EdgeDashboardRobotStateRuleEntity> rules,
         IReadOnlyCollection<EdgeDashboardModelAlarmRuleEntity> modelAlarmRules,
+        IReadOnlyCollection<EdgeDashboardModelStatePriorityEntity> modelStatePriorities,
         JObject envelope,
         EdgeDashboardTelemetrySampleDto sample)
     {
@@ -236,7 +351,7 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
             .Concat(modelAlarmRules
                 .Where(rule => Matches(rule, EdgeDashboardJsonFieldResolver.Resolve(envelope, rule.SourcePath)))
                 .Select(ToMatchedRule))
-            .OrderBy(StatePriority)
+            .OrderBy(rule => StatePriority(rule, modelStatePriorities))
             .ThenBy(x => x.Priority)
             .ToList();
         var newState = matchedRules.FirstOrDefault()?.TargetState ?? EdgeDashboardConstants.Unknown;
@@ -321,6 +436,180 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         runtime.UpdateTime = sample.ReceiveTime;
         await Db.Updateable(runtime).ExecuteCommandAsync();
         await IncrementSampleCountAsync(binding, sample.DataTime, newState);
+    }
+
+    /// <summary>推进启用统计的设备组件状态，并把时长写入独立的设备日统计表。</summary>
+    private async Task ProcessDeviceBindingAsync(
+        EdgeDashboardDeviceBindingEntity binding,
+        IReadOnlyCollection<EdgeDashboardModelAlarmRuleEntity> modelAlarmRules,
+        IReadOnlyCollection<EdgeDashboardModelStatePriorityEntity> modelStatePriorities,
+        JObject envelope,
+        EdgeDashboardTelemetrySampleDto sample)
+    {
+        var newState = ResolveDeviceStatisticState(
+            binding,
+            modelAlarmRules,
+            modelStatePriorities,
+            envelope);
+        var runtime = await Db.Queryable<EdgeDashboardDeviceRuntimeStateEntity>()
+            .FirstAsync(x => x.DeviceBindingId == binding.Id);
+
+        if (runtime == null)
+        {
+            runtime = new EdgeDashboardDeviceRuntimeStateEntity
+            {
+                DeviceBindingId = binding.Id,
+                CurrentState = newState,
+                StateStartTime = sample.DataTime,
+                LastSampleTime = sample.DataTime,
+                LastAccountedTime = sample.DataTime,
+                LastMessageId = sample.MessageId,
+                LastSourceTimestamp = sample.SourceTimestamp,
+                UpdateTime = sample.ReceiveTime
+            };
+            await Db.Insertable(runtime).ExecuteCommandAsync();
+            await IncrementDeviceSampleCountAsync(binding, sample.DataTime, newState);
+            if (newState == EdgeDashboardConstants.Fault)
+                await IncrementDeviceFaultCountAsync(binding, sample.DataTime);
+            return;
+        }
+
+        if (sample.DataTime < runtime.LastSampleTime ||
+            (!string.IsNullOrWhiteSpace(sample.MessageId) &&
+             string.Equals(sample.MessageId, runtime.LastMessageId, StringComparison.Ordinal)))
+            return;
+
+        var accountedSampleTime = Max(sample.DataTime, runtime.LastAccountedTime);
+        var offlineStart = runtime.LastSampleTime.AddSeconds(binding.OnlineTimeoutSeconds);
+        if (accountedSampleTime > runtime.LastAccountedTime)
+        {
+            if (runtime.CurrentState == EdgeDashboardConstants.Offline)
+            {
+                await AddDeviceDurationAsync(
+                    binding,
+                    EdgeDashboardConstants.Offline,
+                    runtime.LastAccountedTime,
+                    accountedSampleTime);
+            }
+            else
+            {
+                await AddDeviceDurationAsync(
+                    binding,
+                    runtime.CurrentState,
+                    runtime.LastAccountedTime,
+                    Min(accountedSampleTime, offlineStart));
+                if (accountedSampleTime > offlineStart)
+                {
+                    await AddDeviceDurationAsync(
+                        binding,
+                        EdgeDashboardConstants.Offline,
+                        Max(runtime.LastAccountedTime, offlineStart),
+                        accountedSampleTime);
+                }
+            }
+        }
+
+        var enteredFault = runtime.CurrentState != EdgeDashboardConstants.Fault &&
+                           newState == EdgeDashboardConstants.Fault;
+        if (!string.Equals(runtime.CurrentState, newState, StringComparison.OrdinalIgnoreCase))
+            runtime.StateStartTime = accountedSampleTime;
+        runtime.CurrentState = newState;
+        runtime.LastSampleTime = sample.DataTime;
+        runtime.LastAccountedTime = accountedSampleTime;
+        runtime.LastMessageId = sample.MessageId;
+        runtime.LastSourceTimestamp = sample.SourceTimestamp;
+        runtime.UpdateTime = sample.ReceiveTime;
+        await Db.Updateable(runtime).ExecuteCommandAsync();
+        await IncrementDeviceSampleCountAsync(binding, sample.DataTime, newState);
+        if (enteredFault) await IncrementDeviceFaultCountAsync(binding, sample.DataTime);
+    }
+
+    /// <summary>设备在模型报警与状态映射同时命中时，按模型状态优先级裁决最终统计状态。</summary>
+    private static string ResolveDeviceStatisticState(
+        EdgeDashboardDeviceBindingEntity binding,
+        IReadOnlyCollection<EdgeDashboardModelAlarmRuleEntity> modelAlarmRules,
+        IReadOnlyCollection<EdgeDashboardModelStatePriorityEntity> modelStatePriorities,
+        JObject envelope)
+    {
+        var candidates = new List<string>();
+        var hasAlarm = modelAlarmRules.Any(rule =>
+            Matches(rule, EdgeDashboardJsonFieldResolver.Resolve(envelope, rule.SourcePath)));
+        if (hasAlarm) candidates.Add(EdgeDashboardConstants.Fault);
+        if (string.IsNullOrWhiteSpace(binding.StatusSourcePath))
+        {
+            candidates.Add(EdgeDashboardConstants.Running);
+            return ResolveHighestPriorityState(candidates, modelStatePriorities);
+        }
+
+        var rawValue = EdgeDashboardJsonFieldResolver.ToCompactText(
+                EdgeDashboardJsonFieldResolver.Resolve(envelope, binding.StatusSourcePath)) ?? string.Empty;
+        var mapping = ReadDeviceStatusMapping(binding.StatusMappingJson);
+        candidates.Add(mapping.TryGetValue(rawValue, out var state)
+            ? state
+            : EdgeDashboardConstants.Unknown);
+        return ResolveHighestPriorityState(candidates, modelStatePriorities);
+    }
+
+    /// <summary>解析设备状态映射；保存时已校验，运行时异常则安全回退为空映射。</summary>
+    private static IReadOnlyDictionary<string, string> ReadDeviceStatusMapping(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return new Dictionary<string, string>();
+        try
+        {
+            return JObject.Parse(json).Properties()
+                .ToDictionary(
+                    property => property.Name.Trim(),
+                    property => property.Value.ToString().Trim().ToUpperInvariant(),
+                    StringComparer.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return new Dictionary<string, string>();
+        }
+    }
+
+    /// <summary>每次收到产量来源设备的新报文时推进日统计，避免看板无人打开时遗漏产量增量。</summary>
+    private async Task ProcessLineOutputBindingAsync(
+        EdgeDashboardLineOutputBindingEntity binding,
+        JObject envelope,
+        EdgeDashboardTelemetrySampleDto sample)
+    {
+        var token = EdgeDashboardJsonFieldResolver.Resolve(envelope, binding.SourcePath);
+        if (!TryReadDecimal(token, out var currentValue)) return;
+
+        var statDate = sample.DataTime.Date;
+        var now = sample.ReceiveTime;
+        var daily = await Db.Queryable<EdgeDashboardLineOutputDailyStatisticEntity>()
+            .FirstAsync(x => x.OutputBindingId == binding.Id && x.StatDate == statDate);
+        if (daily == null)
+        {
+            await Db.Insertable(new EdgeDashboardLineOutputDailyStatisticEntity
+            {
+                OutputBindingId = binding.Id,
+                StatDate = statDate,
+                LineCode = binding.LineCode,
+                BaselineValue = currentValue,
+                LastValue = currentValue,
+                OutputQuantity = binding.CounterMode == "CurrentValue" ? currentValue : 0,
+                LastDataTime = sample.DataTime,
+                CreateTime = now,
+                UpdateTime = now
+            }).ExecuteCommandAsync();
+            return;
+        }
+
+        if (daily.LastDataTime.HasValue && sample.DataTime <= daily.LastDataTime.Value) return;
+        if (binding.CounterMode == "CurrentValue")
+            daily.OutputQuantity = currentValue;
+        else
+            daily.OutputQuantity += currentValue >= daily.LastValue
+                ? currentValue - daily.LastValue
+                : currentValue; // 计数器归零，从归零后的数值继续累计。
+        daily.LastValue = currentValue;
+        daily.LastDataTime = sample.DataTime;
+        daily.LineCode = binding.LineCode;
+        daily.UpdateTime = now;
+        await Db.Updateable(daily).ExecuteCommandAsync();
     }
 
     /// <summary>根据当前命中的故障规则新增、更新或关闭故障生命周期。</summary>
@@ -466,6 +755,67 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         await SaveDailyAsync(daily);
     }
 
+    /// <summary>把一段设备组件状态按业务日边界切分累计，设备和机械手历史表保持独立。</summary>
+    private async Task AddDeviceDurationAsync(
+        EdgeDashboardDeviceBindingEntity binding,
+        string state,
+        DateTime start,
+        DateTime end,
+        ISqlSugarClient? db = null)
+    {
+        if (end <= start) return;
+        db ??= Db;
+        var cursor = start;
+        while (cursor < end)
+        {
+            var statDate = GetBusinessDate(cursor, binding.BusinessDayStartHour);
+            var nextBoundary = statDate.AddDays(1).AddHours(binding.BusinessDayStartHour);
+            var segmentEnd = Min(end, nextBoundary);
+            var seconds = Math.Max(
+                0,
+                (long)Math.Round((segmentEnd - cursor).TotalSeconds, MidpointRounding.AwayFromZero));
+            if (seconds > 0)
+            {
+                var daily = await GetOrCreateDeviceDailyAsync(binding, statDate, db);
+                AddSeconds(daily, state, seconds);
+                daily.LastState = state;
+                daily.UpdateTime = DateTime.Now;
+                await SaveDeviceDailyAsync(daily, db);
+            }
+            cursor = segmentEnd;
+        }
+    }
+
+    /// <summary>累计设备组件样本数，并写入当前业务日的最后状态。</summary>
+    private async Task IncrementDeviceSampleCountAsync(
+        EdgeDashboardDeviceBindingEntity binding,
+        DateTime sampleTime,
+        string state)
+    {
+        var daily = await GetOrCreateDeviceDailyAsync(
+            binding,
+            GetBusinessDate(sampleTime, binding.BusinessDayStartHour),
+            Db);
+        daily.SampleCount++;
+        daily.LastState = state;
+        daily.UpdateTime = DateTime.Now;
+        await SaveDeviceDailyAsync(daily, Db);
+    }
+
+    /// <summary>设备进入故障状态时增加当前业务日故障次数。</summary>
+    private async Task IncrementDeviceFaultCountAsync(
+        EdgeDashboardDeviceBindingEntity binding,
+        DateTime faultTime)
+    {
+        var daily = await GetOrCreateDeviceDailyAsync(
+            binding,
+            GetBusinessDate(faultTime, binding.BusinessDayStartHour),
+            Db);
+        daily.FaultCount++;
+        daily.UpdateTime = DateTime.Now;
+        await SaveDeviceDailyAsync(daily, Db);
+    }
+
     /// <summary>每次新建故障生命周期时，把当日故障次数增加一次。</summary>
     private async Task IncrementFaultCountAsync(
         EdgeDashboardRobotBindingEntity binding,
@@ -553,6 +903,40 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         }
     }
 
+    /// <summary>读取一台设备组件的业务日统计；不存在时构造待新增记录。</summary>
+    private static async Task<EdgeDashboardEquipmentDailyStatisticEntity> GetOrCreateDeviceDailyAsync(
+        EdgeDashboardDeviceBindingEntity binding,
+        DateTime statDate,
+        ISqlSugarClient db)
+    {
+        var daily = await db.Queryable<EdgeDashboardEquipmentDailyStatisticEntity>()
+            .FirstAsync(x => x.ComponentType == "Device" &&
+                             x.ComponentBindingId == binding.Id &&
+                             x.StatDate == statDate);
+        return daily ?? new EdgeDashboardEquipmentDailyStatisticEntity
+        {
+            ComponentType = "Device",
+            ComponentBindingId = binding.Id,
+            StatDate = statDate,
+            LineCode = binding.LineCode,
+            ComponentCode = binding.DeviceCode,
+            ComponentName = binding.DeviceName,
+            CreateTime = DateTime.Now,
+            UpdateTime = DateTime.Now
+        };
+    }
+
+    /// <summary>根据主键决定新增或更新设备组件日统计。</summary>
+    private static async Task SaveDeviceDailyAsync(
+        EdgeDashboardEquipmentDailyStatisticEntity daily,
+        ISqlSugarClient db)
+    {
+        if (daily.Id == 0)
+            daily.Id = await db.Insertable(daily).ExecuteReturnBigIdentityAsync();
+        else
+            await db.Updateable(daily).ExecuteCommandAsync();
+    }
+
     /// <summary>关闭指定绑定的全部活动故障，供通信超时扫描调用。</summary>
     private async Task CloseActiveFaultsAsync(
         long bindingId,
@@ -619,9 +1003,44 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
         };
     }
 
-    /// <summary>故障规则始终高于运行、空闲等普通状态规则。</summary>
-    private static int StatePriority(DashboardMatchedRule rule) =>
-        rule.TargetState == EdgeDashboardConstants.Fault ? 0 : 1;
+    private static bool TryReadDecimal(JToken? token, out decimal value)
+    {
+        value = 0;
+        var raw = EdgeDashboardJsonFieldResolver.ToObject(token);
+        return raw != null && decimal.TryParse(
+            Convert.ToString(raw, CultureInfo.InvariantCulture),
+            NumberStyles.Any,
+            CultureInfo.InvariantCulture,
+            out value);
+    }
+
+    /// <summary>按模型配置裁决状态冲突；未配置时维持故障优先、空闲次之的默认行为。</summary>
+    private static int StatePriority(
+        DashboardMatchedRule rule,
+        IReadOnlyCollection<EdgeDashboardModelStatePriorityEntity> modelStatePriorities) =>
+        ResolveStatePriority(rule.TargetState, modelStatePriorities);
+
+    private static string ResolveHighestPriorityState(
+        IEnumerable<string> candidates,
+        IReadOnlyCollection<EdgeDashboardModelStatePriorityEntity> modelStatePriorities) =>
+        candidates
+            .OrderBy(state => ResolveStatePriority(state, modelStatePriorities))
+            .ThenBy(state => state, StringComparer.Ordinal)
+            .FirstOrDefault() ?? EdgeDashboardConstants.Unknown;
+
+    private static int ResolveStatePriority(
+        string state,
+        IReadOnlyCollection<EdgeDashboardModelStatePriorityEntity> modelStatePriorities) =>
+        modelStatePriorities.FirstOrDefault(x =>
+            string.Equals(x.State, state, StringComparison.OrdinalIgnoreCase))?.Priority ??
+        state switch
+        {
+            EdgeDashboardConstants.Fault => 10,
+            EdgeDashboardConstants.Idle => 20,
+            EdgeDashboardConstants.Stopped => 30,
+            EdgeDashboardConstants.Running => 40,
+            _ => 90
+        };
 
     /// <summary>把机械手自己的状态规则包装为统一规则，便于与模型报警规则合并处理。</summary>
     private static DashboardMatchedRule ToMatchedRule(
@@ -708,6 +1127,35 @@ public sealed class EdgeDashboardTelemetryProcessor : IEdgeDashboardTelemetryPro
     /// <summary>把秒数加到目标状态列，未知状态也有独立兜底列。</summary>
     private static void AddSeconds(
         EdgeDashboardRobotDailyStatisticEntity daily,
+        string state,
+        long seconds)
+    {
+        switch (state)
+        {
+            case EdgeDashboardConstants.Running:
+                daily.RunningSeconds += seconds;
+                break;
+            case EdgeDashboardConstants.Idle:
+                daily.IdleSeconds += seconds;
+                break;
+            case EdgeDashboardConstants.Fault:
+                daily.FaultSeconds += seconds;
+                break;
+            case EdgeDashboardConstants.Stopped:
+                daily.StoppedSeconds += seconds;
+                break;
+            case EdgeDashboardConstants.Offline:
+                daily.OfflineSeconds += seconds;
+                break;
+            default:
+                daily.UnknownSeconds += seconds;
+                break;
+        }
+    }
+
+    /// <summary>把秒数加到设备组件日统计的目标状态列。</summary>
+    private static void AddSeconds(
+        EdgeDashboardEquipmentDailyStatisticEntity daily,
         string state,
         long seconds)
     {

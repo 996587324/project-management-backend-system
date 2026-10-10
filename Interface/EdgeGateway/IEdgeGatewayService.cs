@@ -62,6 +62,8 @@ public interface IEdgeGatewayService
         EdgeWebSocketReceiveRecordQueryDto query);
     /// <summary>接收边缘节点上传的标准消息并写入中心队列。</summary>
     Task<EdgeMessageAcceptResultDto> ReceiveMessagesAsync(EdgeMessageBatchDto dto);
+    /// <summary>补偿写入失败的接收日表和数据追溯投影，避免短暂日志库故障造成永久断档。</summary>
+    Task<int> RecoverMessageProjectionsAsync(int limit, CancellationToken cancellationToken = default);
     /// <summary>将失败队列重置为待处理状态。</summary>
     Task<int> ResetQueueAsync(EdgeRetryRequestDto dto);
     Task<int> DeleteQueueAsync(EdgeBatchIdsDto dto);

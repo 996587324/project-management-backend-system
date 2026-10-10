@@ -116,7 +116,8 @@ public sealed class AgentModelInvocationLogWriteDto
     public string Model { get; set; } = string.Empty;
     public bool Success { get; set; }
     public int? StatusCode { get; set; }
-    public int? BusinessCode { get; set; }
+    /// <summary>0 表示模型平台没有返回业务码。</summary>
+    public int BusinessCode { get; set; }
     public string? ErrorMessage { get; set; }
     public string? TraceId { get; set; }
     public string? ActualModel { get; set; }

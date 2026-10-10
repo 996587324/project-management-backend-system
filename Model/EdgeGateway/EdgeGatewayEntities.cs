@@ -284,6 +284,12 @@ public class EdgeMessageQueueEntity
     public DateTime MessageTime { get; set; } = DateTime.Now;
     public DateTime CreateTime { get; set; } = DateTime.Now;
     public DateTime? UploadTime { get; set; } = DateTime.Now;
+    /// <summary>原始 WebSocket 接收记录已写入独立日志库的时间；为空时由后台补偿任务重试。</summary>
+    [SugarColumn(IsNullable = true)]
+    public DateTime? ReceiveRecordProjectedTime { get; set; }
+    /// <summary>数据追溯历史点已写入独立日志库的时间；为空时由后台补偿任务重试。</summary>
+    [SugarColumn(IsNullable = true)]
+    public DateTime? DataTraceProjectedTime { get; set; }
 }
 
 /// <summary>中心 SQL Server 中每次 B 系统转发的结果记录。</summary>

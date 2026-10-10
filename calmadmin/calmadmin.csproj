@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="6.0.36" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.NewtonsoftJson" Version="6.0.16" />
     <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="6.36.0" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="SqlSugarCore" Version="5.1.4.76" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.2.3" />

@@ -27,6 +27,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
     private readonly IMemoryCache _memoryCache;
     private readonly IDataProtector _stateProtector;
     private readonly OAuth2Options _options;
+    private readonly IUserActivityService _userActivityService;
 
     public OAuth2LoginService(
         SqlSugarScope db,
@@ -34,7 +35,8 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
         IHttpClientFactory httpClientFactory,
         IMemoryCache memoryCache,
         IDataProtectionProvider dataProtectionProvider,
-        IOptionsMonitor<OAuth2Options> options)
+        IOptionsMonitor<OAuth2Options> options,
+        IUserActivityService userActivityService)
     {
         _db = db;
         _jwtService = jwtService;
@@ -42,6 +44,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
         _memoryCache = memoryCache;
         _stateProtector = dataProtectionProvider.CreateProtector("CalmAdmin.OAuth2.State.v1");
         _options = options.CurrentValue;
+        _userActivityService = userActivityService;
     }
 
     private ISqlSugarClient Db => _db.GetConnection(DbConfigId);
@@ -136,9 +139,16 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
             Description = account.NickName,
             CreateDate = account.CreateTime
         };
+        var sessionId = await _userActivityService.StartSessionAsync(
+            account.UserId,
+            account.UserName,
+            "OAuth2",
+            null,
+            null,
+            cancellationToken);
         var tokenData = new TokenData
         {
-            token = _jwtService.GetToken(user),
+            token = _jwtService.GetToken(user, sessionId),
             refreshToken = _jwtService.GenerateRefreshToken()
         };
         var ticket = CreateRandomUrlToken(32);

@@ -14,11 +14,15 @@ public sealed class EdgeDashboardPublicController : ControllerBase
     private const string PublicDashboardCode = "production-dashboard";
 
     private readonly IEdgeDashboardService _service;
+    private readonly IEdgeDashboardAiInsightService _insightService;
 
     /// <summary>通过 IOC 复用看板业务服务，确保公开看板与管理看板的数据口径一致。</summary>
-    public EdgeDashboardPublicController(IEdgeDashboardService service)
+    public EdgeDashboardPublicController(
+        IEdgeDashboardService service,
+        IEdgeDashboardAiInsightService insightService)
     {
         _service = service;
+        _insightService = insightService;
     }
 
     /// <summary>一次读取公开看板首屏所需的线体列表和全部 Three.js 场景。</summary>
@@ -38,6 +42,24 @@ public sealed class EdgeDashboardPublicController : ControllerBase
         {
             await ValidatePublicLineAsync(lineCode);
             return await _service.GetLineRuntimeAsync(lineCode.Trim());
+        });
+
+    /// <summary>读取公开看板当前线体的当日产出。</summary>
+    [HttpGet("line-output")]
+    public async Task<IActionResult> GetLineOutput([FromQuery] string lineCode) =>
+        await ExecuteAsync(async () =>
+        {
+            await ValidatePublicLineAsync(lineCode);
+            return await _service.GetLineOutputAsync(lineCode.Trim());
+        });
+
+    /// <summary>读取公开看板当前有效的 AI 建议；没有有效决策时返回空。</summary>
+    [HttpGet("ai-insight")]
+    public async Task<IActionResult> GetAiInsight([FromQuery] string lineCode) =>
+        await ExecuteAsync(async () =>
+        {
+            await ValidatePublicLineAsync(lineCode);
+            return await _insightService.GetLatestAsync(PublicDashboardCode, lineCode.Trim());
         });
 
     /// <summary>分页读取公开看板使用的机械手每日状态累计数据。</summary>

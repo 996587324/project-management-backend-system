@@ -1,20 +1,24 @@
 using Microsoft.OpenApi.Models;
+using Interface;
 using Model;
+using ModelContextProtocol.AspNetCore;
+using ModelContextProtocol.Protocol;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using Service;
 using Swashbuckle.AspNetCore.SwaggerUI;
+using calmadmin.Controllers.ExternalTools;
 using calmadmin.WebSockets;
-using ÉÏ´«MES.Config;
+using ä¸Šä¼ MES.Config;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
 builder.Services.AddControllers()
-    .AddJsonOptions(options => options.JsonSerializerOptions.PropertyNamingPolicy = null) //·ÀÖ¹´«¹ıÀ´JSON¶ÔÏóÊ××ÖÄ¸Ğ¡Ğ´ËùÒÔÖÃÎªnull
+    .AddJsonOptions(options => options.JsonSerializerOptions.PropertyNamingPolicy = null) //é˜²æ­¢ä¼ è¿‡æ¥JSONå¯¹è±¡é¦–å­—æ¯å°å†™æ‰€ä»¥ç½®ä¸ºnull
     .AddNewtonsoftJson(op =>
     {
-        //JSON ²»´¦ÀínullÖµ£¬ÒÔ¼°ÈÕÆÚÊ±¼ä¸ñÊ½»¯,·ñÔòµ¼ÖÂ½ÓÊÜ²»µ½ÊµÌå
+        //JSON ä¸å¤„ç†nullå€¼ï¼Œä»¥åŠæ—¥æœŸæ—¶é—´æ ¼å¼åŒ–,å¦åˆ™å¯¼è‡´æ¥å—ä¸åˆ°å®ä½“
         op.SerializerSettings.ContractResolver = new DefaultContractResolver();
         op.SerializerSettings.NullValueHandling = NullValueHandling.Ignore;
         op.SerializerSettings.DateFormatString = "yyyy-MM-dd HH:mm:ss";
@@ -24,26 +28,39 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 builder.Services.AddHttpClient();
-// Ìí¼ÓÅäÖÃÎÄ¼ş
+builder.Services.AddHttpContextAccessor();
+var mcpV2ServerInfoProvider = new ExternalMcpV2ServerInfoProvider();
+builder.Services.AddSingleton(mcpV2ServerInfoProvider);
+builder.Services
+    .AddMcpServer(options =>
+    {
+        options.ServerInfo = mcpV2ServerInfoProvider.ServerInfo;
+        options.ServerInstructions = "å†…ç½‘æ•°æ®å·¥å…·æœåŠ¡ã€‚è¯»å–å·¥å…·å¯ç›´æ¥è°ƒç”¨ï¼›è¶Šé™å‘Šè­¦çš„è®¤é¢†ä¸ç¡®è®¤å¿…é¡»æ˜¾å¼ä¼ å…¥ confirm: trueã€‚";
+    })
+    .WithHttpTransport(options => options.Stateless = true)
+    .WithListToolsHandler(ExternalMcpV2Handlers.ListToolsAsync)
+    .WithCallToolHandler(ExternalMcpV2Handlers.CallToolAsync);
+// æ·»åŠ é…ç½®æ–‡ä»¶
 // WebApplication.CreateBuilder already loads base and environment-specific appsettings files.
 builder.Register();
 builder.Services.AddScoped<AgentWebSocketHandler>();
 
-// ×¢²áÊı¾İ¿â¹¤³§£¨µ¥Àı£©
+// æ³¨å†Œæ•°æ®åº“å·¥å‚ï¼ˆå•ä¾‹ï¼‰
 builder.Services.AddSingleton<DbFactory>();
 
-// ×¢²áÒµÎñ·şÎñ 
+// æ³¨å†Œä¸šåŠ¡æœåŠ¡
 builder.Services.AddTransient<DataService>();
-// ¶ÁÈ¡ appsettings.json ÖĞµÄ Urls ÅäÖÃ
+// è¯»å– appsettings.json ä¸­çš„ Urls é…ç½®
 var urls = builder.Configuration["Urls"];
 if (!string.IsNullOrEmpty(urls))
 {
-    builder.WebHost.UseUrls(urls); // Ó¦ÓÃ×Ô¶¨ÒåÓòÃûÅäÖÃ
+    builder.WebHost.UseUrls(urls); // åº”ç”¨è‡ªå®šä¹‰åŸŸåé…ç½®
 }
 
 var app = builder.Build();
+app.UseMiddleware<calmadmin.Middleware.RequestTimingMiddleware>();
 // Configure the HTTP request pipeline.
-////if (app.Environment.IsDevelopment())//²»ÊÇµ÷ÊÔ»·¾³ÏÂÒ»Ñù¿ÉÒÔÆô¶¯swagger
+////if (app.Environment.IsDevelopment())//ä¸æ˜¯è°ƒè¯•ç¯å¢ƒä¸‹ä¸€æ ·å¯ä»¥å¯åŠ¨swagger
 {
         
     app.UseSwagger();
@@ -52,11 +69,11 @@ var app = builder.Build();
     {
         c.SwaggerEndpoint("/swagger/v1/swagger.json", "MyMES V1");
         c.RoutePrefix = string.Empty;
-        //c.DocExpansion(DocExpansion.None);//ÑùÊ½
+        //c.DocExpansion(DocExpansion.None);//æ ·å¼
     });
 }
 
-#region ¼øÈ¨ÊÚÈ¨
+#region é‰´æƒæˆæƒ
 app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(20)
@@ -65,8 +82,30 @@ app.UseRouting();
 app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/mcp/v2"))
+    {
+        try
+        {
+            var provider = context.RequestServices.GetRequiredService<ExternalMcpV2ServerInfoProvider>();
+            var externalToolService = context.RequestServices.GetRequiredService<IExternalToolService>();
+            await provider.RefreshAsync(externalToolService);
+        }
+        catch (Exception exception)
+        {
+            context.RequestServices
+                .GetRequiredService<ILoggerFactory>()
+                .CreateLogger("ExternalMcpV2")
+                .LogWarning(exception, "Unable to refresh MCP V2 server information; using the last known value.");
+        }
+    }
+
+    await next();
+});
 #endregion
 app.MapControllers();
+app.MapMcp("/mcp/v2").AllowAnonymous();
 app.MapGet("/ws/agent", async (HttpContext context, AgentWebSocketHandler handler) =>
 {
     await handler.HandleAsync(context);

@@ -10,6 +10,10 @@ public class EdgeGatewayBootstrapOptions
     public string DeviceName { get; set; } = string.Empty;
     public string CenterBaseUrl { get; set; } = string.Empty;
     public string? ApiKey { get; set; }
+    /// <summary>
+    /// 本地日数据库文件的基础路径。配置 data/edge-gateway.db 时，运行时实际使用
+    /// data/edge-gateway-yyyyMMdd.db；旧同名单文件仅在首次升级时用于迁移待上传数据。
+    /// </summary>
     public string DatabasePath { get; set; } = "data/edge-gateway.db";
     public int UploadBatchSize { get; set; } = 50;
     public int UploadIntervalSeconds { get; set; } = 3;

@@ -9,6 +9,7 @@ using Model.Agent;
 using Model.EdgeGateway;
 using Model.Other;
 using Model.Pda;
+using Model.WeChatClawBot;
 using Newtonsoft.Json;
 using Service;
 using SqlSugar;
@@ -49,7 +50,10 @@ namespace 上传MES.Config
                 #region 注册 SqlSugarScope（支持多数据库）
                 builder.Register<SqlSugarScope>(context =>
                 {
-                    var db = new SqlSugarScope(new List<ConnectionConfig>
+                    // AOP 会在后续异步上下文中调用，不能捕获已经结束的 Autofac resolve context。
+                    var sqlLogger = context.Resolve<ILoggerFactory>().CreateLogger("DatabaseDiagnostics");
+                    var sqlConfiguration = context.Resolve<IConfiguration>();
+                    var connectionConfigs = new List<ConnectionConfig>
                     {
                         new ConnectionConfig
                         {
@@ -138,16 +142,18 @@ namespace 上传MES.Config
                             IsAutoCloseConnection = false,
                             InitKeyType = InitKeyType.Attribute
                         }
-                    },
+                    };
+                    var db = new SqlSugarScope(connectionConfigs,
                     // AOP 配置在 ScopeConfig 回调里
                     db =>
                     {
-                        db.Aop.OnLogExecuted = (sql, pars) =>
+                        // 多租户的每个连接分别配置，不能只配置第一个默认连接。
+                        foreach (var config in connectionConfigs)
                         {
-                            Console.WriteLine();
-                            Console.WriteLine($"{DateTime.Now:yyyyMMdd HH:mm:ss}，Sql语句：{sql}");
-                            Console.WriteLine("===========================================================================");
-                        };
+                            object configId = config.ConfigId;
+                            calmadmin.Config.SqlDiagnosticLogging.Configure(
+                                db.GetConnection(configId), sqlLogger, sqlConfiguration);
+                        }
                     });
 
                     return db;
@@ -166,22 +172,35 @@ namespace 上传MES.Config
             builder.Services.Configure<JWTTokenOptions>(builder.Configuration.GetSection("JWTTokenOptions"));
             builder.Services.Configure<PdaOptions>(builder.Configuration.GetSection("PdaOptions"));
             builder.Services.Configure<OAuth2Options>(builder.Configuration.GetSection("OAuth2"));
+            builder.Services.Configure<WeChatClawBotOptions>(builder.Configuration.GetSection("WeChatClawBot"));
             builder.Services.AddMemoryCache();
             // 模型平台密钥通过 Data Protection 加密后保存到数据库，不允许配置管理接口返回明文。
             builder.Services.AddDataProtection().SetApplicationName("CalmAdmin.AgentModelProvider");
             builder.Services.AddSingleton<IAgentModelDatabaseInitializer, AgentModelDatabaseInitializer>();
             builder.Services.AddSingleton<IAgentSecretProtector, AgentSecretProtector>();
+            builder.Services.AddSingleton<SystemDatabaseInitializer>();
+            builder.Services.AddHostedService<SystemDatabaseInitializationHostedService>();
             // 在 Worker 和自动转发循环启动前，只初始化一次 EdgeGateway 中心数据库结构。
             builder.Services.AddHostedService<EdgeGatewayDatabaseInitializationHostedService>();
+            builder.Services.AddHostedService<EdgeRealtimeFieldBackfillHostedService>();
+            builder.Services.AddHostedService<EdgeDeviceCardPushHostedService>();
             builder.Services.AddHostedService<EdgeGatewayHostedService>();
             // 中心端自动扫描 SQL Server 队列并转发到 B 系统，运行开关和间隔来自数据库。
             builder.Services.AddHostedService<EdgeBAutoForwardHostedService>();
             // 日志中心仅保留最近七天的运行事件，启动时清理一次，之后每天清理一次。
             builder.Services.AddHostedService<EdgeGatewayLogCleanupHostedService>();
+            // 数据追溯参数点按当前保留时长清理，并异步生成大数据导出文件。
+            builder.Services.AddHostedService<EdgeDataTraceHostedService>();
+            // 每分钟结算失活的后台用户会话，并按保留周期清理登录与操作审计日志。
+            builder.Services.AddHostedService<UserActivityCleanupHostedService>();
             // 每十秒推进无新样本机械手的离线时间，统计服务不依赖看板页面是否打开。
             builder.Services.AddHostedService<EdgeDashboardStatisticsHostedService>();
+            // 每五分钟按线体生成一次 AI 运行建议；页面只读取结果，不直接调用模型。
+            builder.Services.AddHostedService<EdgeDashboardAiInsightHostedService>();
             // 每日按数据库配置的时间为每条启用线体生成独立看板日报。
             builder.Services.AddHostedService<EdgeDashboardExportHostedService>();
+            // 延迟维护微信 ClawBot 的会话游标，不能阻塞 Web 服务启动。
+            builder.Services.AddHostedService<WeChatClawBotConversationHostedService>();
             #region JWT校验
             //增加鉴权逻辑
             JWTTokenOptions tokenOptions = new JWTTokenOptions();
@@ -230,6 +249,23 @@ namespace 上传MES.Config
                          return Task.CompletedTask;
                      }
                  };
+             })
+             .AddJwtBearer(ExternalToolAuthenticationDefaults.Scheme, options =>
+             {
+                 // 外部 MCP/OpenAPI 仅接受服务端签发且 audience 专属的短期机器令牌，
+                 // 明确拒绝后台用户登录 JWT，避免把后台会话凭据作为对外接口凭据使用。
+                 options.TokenValidationParameters = new TokenValidationParameters
+                 {
+                     ValidateIssuer = true,
+                     ValidateAudience = true,
+                     ValidateLifetime = true,
+                     RequireExpirationTime = true,
+                     ValidateIssuerSigningKey = true,
+                     ValidIssuer = tokenOptions.Issuer,
+                     ValidAudience = ExternalToolAuthenticationDefaults.Audience,
+                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tokenOptions.SecurityKey)),
+                     ClockSkew = TimeSpan.FromMinutes(1)
+                 };
              });
             #endregion
             //添加跨域策略
@@ -240,7 +276,7 @@ namespace 上传MES.Config
                      .AllowAnyOrigin()
                      .AllowAnyHeader()
                      .AllowAnyMethod()
-                     .WithExposedHeaders("Content‑Disposition")//暴露 Content-Disposition 响应头，便于下载
+                     .WithExposedHeaders("Content?Disposition")//暴露 Content-Disposition 响应头，便于下载
                 );
             });
             //设置Json返回的日期格式
@@ -262,7 +298,7 @@ namespace 上传MES.Config
 
             #region ip监听
             // 步骤1：定义要监听的端口
-            int listenPort = 8089;
+            int listenPort = 8087;
             // 步骤2：获取本机所有可用的 IPv4 地址
             var availableIps = GetAvailableIPv4Addresses();
 
@@ -322,6 +358,14 @@ namespace 上传MES.Config
             builder.Services.AddScoped<IProjectManageService, ProjectManageService>();
             builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("EmailOptions"));
             builder.Services.AddScoped<IEmailService, EmailService>();
+            builder.Services.AddScoped<IWeChatClawBotService, WeChatClawBotService>();
+            builder.Services.AddScoped<IEdgeDeviceCardPushService, EdgeDeviceCardPushService>();
+            var weChatClawBotOptions = builder.Configuration.GetSection("WeChatClawBot").Get<WeChatClawBotOptions>() ?? new WeChatClawBotOptions();
+            builder.Services.AddHttpClient(nameof(WeChatClawBotService), client =>
+            {
+                // 微信扫码和收消息使用约 35 秒的长轮询，客户端超时必须留出余量。
+                client.Timeout = TimeSpan.FromSeconds(Math.Clamp(weChatClawBotOptions.HttpTimeoutSeconds, 40, 60));
+            });
             builder.Services.AddScoped<IAgentToolRegistryService, AgentToolRegistryService>();
             builder.Services.AddScoped<IAgentToolDispatcher, AgentToolDispatcher>();
             builder.Services.AddScoped<IAgentFrameworkRuntime, MicrosoftAgentFrameworkRuntime>();
