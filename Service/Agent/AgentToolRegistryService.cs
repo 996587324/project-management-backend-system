@@ -22,7 +22,7 @@ public class AgentToolRegistryService : IAgentToolRegistryService
     private static readonly SemaphoreSlim InitializeLock = new(1, 1);
     private static readonly object TableInitializeLock = new();
     private static bool TablesInitialized;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     public AgentToolRegistryService(
         SqlSugarScope dbScope,

@@ -15,13 +15,13 @@ namespace calmadmin.Controllers.ExternalTools;
 /// </summary>
 internal static class ExternalMcpV2Handlers
 {
-    internal static ValueTask<ListToolsResult> ListToolsAsync(
+    internal static async ValueTask<ListToolsResult> ListToolsAsync(
         RequestContext<ListToolsRequestParams> request,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var services = request.Services ?? throw new InvalidOperationException("MCP 请求服务上下文不可用");
-        var caller = GetCaller(services);
+        var caller = await GetCallerAsync(services);
         var service = services.GetRequiredService<IExternalToolService>();
         var tools = service.GetDefinitions(caller)
             .Select(definition => new Tool
@@ -39,7 +39,7 @@ internal static class ExternalMcpV2Handlers
             })
             .ToList();
 
-        return ValueTask.FromResult(new ListToolsResult { Tools = tools });
+        return new ListToolsResult { Tools = tools };
     }
 
     internal static async ValueTask<CallToolResult> CallToolAsync(
@@ -52,7 +52,7 @@ internal static class ExternalMcpV2Handlers
         var result = await service.ExecuteAsync(
             request.Params.Name ?? string.Empty,
             ToJsonElement(request.Params.Arguments),
-            GetCaller(services),
+            await GetCallerAsync(services),
             httpContext?.TraceIdentifier ?? Guid.NewGuid().ToString("N"),
             cancellationToken);
 
@@ -70,16 +70,12 @@ internal static class ExternalMcpV2Handlers
         };
     }
 
-    private static ExternalToolCallerContext GetCaller(IServiceProvider services)
+    private static Task<ExternalToolCallerContext> GetCallerAsync(IServiceProvider services)
     {
         var httpContext = services.GetService<IHttpContextAccessor>()?.HttpContext;
         return httpContext == null
-            ? new ExternalToolCallerContext
-            {
-                IsDirectAccess = true,
-                ClientId = "internal-mcp"
-            }
-            : ExternalToolCallerContextFactory.CreateDirect(httpContext);
+            ? throw new UnauthorizedAccessException("MCP HTTP 调用上下文不可用")
+            : ExternalToolCallerContextFactory.CreateAuthenticatedAsync(httpContext);
     }
 
     private static JsonElement ToJsonElement(IDictionary<string, JsonElement>? arguments) =>

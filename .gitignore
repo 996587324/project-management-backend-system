@@ -30,3 +30,9 @@
 /_verify_external_tools_scope_length
 /_verify_mcp_server_setting
 /_verify_public_dashboard
+
+# 本地编译、隔离验证与运行数据，不随业务源码发布。
+**/bin/
+**/obj/
+/_verify_*/
+/calmadmin/data/

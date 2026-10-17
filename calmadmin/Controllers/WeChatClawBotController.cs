@@ -16,11 +16,13 @@ public sealed class WeChatClawBotController : ControllerBase
 {
     private readonly IWeChatClawBotService _service;
     private readonly SqlSugarScope _dbScope;
+    private readonly ISystemApplicationService _applications;
 
-    public WeChatClawBotController(IWeChatClawBotService service, SqlSugarScope dbScope)
+    public WeChatClawBotController(IWeChatClawBotService service, SqlSugarScope dbScope, ISystemApplicationService applications)
     {
         _service = service;
         _dbScope = dbScope;
+        _applications = applications;
     }
 
     [HttpGet("me")]
@@ -178,10 +180,10 @@ public sealed class WeChatClawBotController : ControllerBase
 
     private async Task<SysUserInfo> ResolveCurrentUserAsync()
     {
-        var userKey = User.FindFirst("Id")?.Value
-            ?? User.FindFirst(ClaimTypes.NameIdentifier)?.Value
-            ?? User.FindFirst("Name")?.Value
-            ?? User.Identity?.Name;
+        var access = await _applications.GetAccessAsync(User, true);
+        if (!access.HasPermission("WeChatClawBot") && !access.HasPermission("WeChatClawBotManagement"))
+            throw new UnauthorizedAccessException("没有微信 ClawBot 功能权限");
+        var userKey = access.UserId;
         if (string.IsNullOrWhiteSpace(userKey)) throw new InvalidOperationException("无法识别当前登录用户。");
         var user = await _dbScope.GetConnectionScope("calmadmin").Queryable<SysUserInfo>()
             .FirstAsync(x => x.Enabled && (x.UserId == userKey || x.UserName == userKey));

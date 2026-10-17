@@ -28,6 +28,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
     private readonly IDataProtector _stateProtector;
     private readonly OAuth2Options _options;
     private readonly IUserActivityService _userActivityService;
+    private readonly ISystemApplicationService _applications;
 
     public OAuth2LoginService(
         SqlSugarScope db,
@@ -36,7 +37,8 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
         IMemoryCache memoryCache,
         IDataProtectionProvider dataProtectionProvider,
         IOptionsMonitor<OAuth2Options> options,
-        IUserActivityService userActivityService)
+        IUserActivityService userActivityService,
+        ISystemApplicationService applications)
     {
         _db = db;
         _jwtService = jwtService;
@@ -45,6 +47,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
         _stateProtector = dataProtectionProvider.CreateProtector("CalmAdmin.OAuth2.State.v1");
         _options = options.CurrentValue;
         _userActivityService = userActivityService;
+        _applications = applications;
     }
 
     private ISqlSugarClient Db => _db.GetConnection(DbConfigId);
@@ -146,6 +149,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
             null,
             null,
             cancellationToken);
+        await _applications.RegisterSessionAsync(account.UserId, sessionId);
         var tokenData = new TokenData
         {
             token = _jwtService.GetToken(user, sessionId),
@@ -313,7 +317,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
             if (!string.IsNullOrWhiteSpace(externalUser.NickName)) account.NickName = externalUser.NickName;
             if (!string.IsNullOrWhiteSpace(externalUser.Email)) account.Email = externalUser.Email;
             account.UpdateTime = now;
-            await Db.Updateable(account).ExecuteCommandAsync();
+            await Db.Updateable(account).IgnoreColumns(x => x.AvatarFileKey).ExecuteCommandAsync();
             return account;
         }
 
@@ -352,7 +356,7 @@ public sealed class OAuth2LoginService : IOAuth2LoginService
             if (!string.IsNullOrWhiteSpace(externalUser.NickName)) concurrentAccount.NickName = externalUser.NickName;
             if (!string.IsNullOrWhiteSpace(externalUser.Email)) concurrentAccount.Email = externalUser.Email;
             concurrentAccount.UpdateTime = now;
-            await Db.Updateable(concurrentAccount).ExecuteCommandAsync();
+            await Db.Updateable(concurrentAccount).IgnoreColumns(x => x.AvatarFileKey).ExecuteCommandAsync();
             return concurrentAccount;
         }
     }

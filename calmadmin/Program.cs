@@ -10,11 +10,16 @@ using Swashbuckle.AspNetCore.SwaggerUI;
 using calmadmin.Controllers.ExternalTools;
 using calmadmin.WebSockets;
 using 上传MES.Config;
+if (args.Contains("--process-formula-worker", StringComparer.Ordinal))
+{
+    await ProcessFormulaWorker.RunAsync();
+    return;
+}
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers()
+builder.Services.AddControllers(options => options.Filters.Add<calmadmin.Config.SystemApplicationAccessFilter>())
     .AddJsonOptions(options => options.JsonSerializerOptions.PropertyNamingPolicy = null) //防止传过来JSON对象首字母小写所以置为null
     .AddNewtonsoftJson(op =>
     {
@@ -35,7 +40,7 @@ builder.Services
     .AddMcpServer(options =>
     {
         options.ServerInfo = mcpV2ServerInfoProvider.ServerInfo;
-        options.ServerInstructions = "内网数据工具服务。读取工具可直接调用；越限告警的认领与确认必须显式传入 confirm: true。";
+        options.ServerInstructions = "按调用者的系统授权提供数据工具。写操作必须显式传入 confirm: true。";
     })
     .WithHttpTransport(options => options.Stateless = true)
     .WithListToolsHandler(ExternalMcpV2Handlers.ListToolsAsync)
@@ -105,7 +110,7 @@ app.Use(async (context, next) =>
 });
 #endregion
 app.MapControllers();
-app.MapMcp("/mcp/v2").AllowAnonymous();
+app.MapMcp("/mcp/v2").RequireAuthorization("McpAccess");
 app.MapGet("/ws/agent", async (HttpContext context, AgentWebSocketHandler handler) =>
 {
     await handler.HandleAsync(context);

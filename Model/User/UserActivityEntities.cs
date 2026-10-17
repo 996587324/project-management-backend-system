@@ -50,6 +50,8 @@ public class SysUserLoginLogEntity
 [SugarIndex("IX_SysUserOperationLog_ModuleTime", nameof(Module), OrderByType.Asc, nameof(CreateTime), OrderByType.Desc, false)]
 public class SysUserOperationLogEntity
 {
+    [SugarColumn(Length = 32, IsNullable = true)]
+    public string? AppCode { get; set; }
     [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
     public long Id { get; set; }
 

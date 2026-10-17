@@ -25,6 +25,9 @@ namespace Model.User
         [SugarColumn(ColumnName = "email", Length = 256, IsNullable = true)]
         public string Email { get; set; }
 
+        [SugarColumn(ColumnName = "avatar_file_key", Length = 64, IsNullable = true)]
+        public string? AvatarFileKey { get; set; }
+
         [SugarColumn(ColumnName = "roles", Length = 512, IsNullable = true)]
         public string Roles { get; set; }
 

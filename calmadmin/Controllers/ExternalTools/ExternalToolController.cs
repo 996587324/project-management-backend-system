@@ -11,8 +11,8 @@ using Service;
 namespace calmadmin.Controllers.ExternalTools;
 
 /// <summary>为不支持 MCP 的模型平台提供等价的 OpenAPI 工具目录和调用入口。</summary>
-/// <remarks>该入口按内网直连模式开放，不校验 ClientId、ClientSecret、Token 或来源 IP。</remarks>
-[AllowAnonymous]
+/// <remarks>与标准 MCP V2 使用相同的专用令牌、工具授权和资源范围。</remarks>
+[Authorize(AuthenticationSchemes = ExternalToolAuthenticationDefaults.Scheme)]
 [ApiController]
 [Route("api/external/v1")]
 public sealed class ExternalToolController : ControllerBase
@@ -25,9 +25,9 @@ public sealed class ExternalToolController : ControllerBase
     }
 
     [HttpGet("tools")]
-    public IActionResult GetTools() => Ok(new JObject
+    public async Task<IActionResult> GetTools() => Ok(new JObject
     {
-        ["data"] = ExternalToolJsonMapper.ToTools(_service.GetDefinitions(BuildCaller()))
+        ["data"] = ExternalToolJsonMapper.ToTools(_service.GetDefinitions(await ExternalToolCallerContextFactory.CreateAuthenticatedAsync(HttpContext)))
     });
 
     [HttpPost("tools/{toolName}")]
@@ -36,13 +36,11 @@ public sealed class ExternalToolController : ControllerBase
         var result = await _service.ExecuteAsync(
             toolName,
             ToJsonElement(arguments),
-            BuildCaller(),
+            await ExternalToolCallerContextFactory.CreateAuthenticatedAsync(HttpContext),
             GetRequestId(),
             cancellationToken);
         return result.Success ? Ok(new { data = result.Data }) : BadRequest(new { message = result.Message });
     }
-
-    private ExternalToolCallerContext BuildCaller() => ExternalToolCallerContextFactory.CreateDirect(HttpContext);
 
     private string GetRequestId() => HttpContext.TraceIdentifier;
 
@@ -51,8 +49,8 @@ public sealed class ExternalToolController : ControllerBase
 }
 
 /// <summary>远程 MCP 的 Streamable HTTP 最小端点；只声明并执行白名单只读工具。</summary>
-/// <remarks>该入口按内网直连模式开放，不校验 ClientId、ClientSecret、Token 或来源 IP。</remarks>
-[AllowAnonymous]
+/// <remarks>兼容旧协议入口，但不能绕过标准 MCP V2 的授权边界。</remarks>
+[Authorize(AuthenticationSchemes = ExternalToolAuthenticationDefaults.Scheme)]
 [ApiController]
 [Route("mcp")]
 public sealed class ExternalMcpController : ControllerBase
@@ -72,7 +70,7 @@ public sealed class ExternalMcpController : ControllerBase
         var id = request["id"]?.DeepClone();
         var method = request.Value<string>("method");
         var parameters = request["params"] as JObject ?? new JObject();
-        var caller = ExternalToolCallerContextFactory.CreateDirect(HttpContext);
+        var caller = await ExternalToolCallerContextFactory.CreateAuthenticatedAsync(HttpContext);
 
         if (string.Equals(method, "initialize", StringComparison.Ordinal))
             return await InitializeAsync(id);
@@ -149,8 +147,44 @@ public sealed class ExternalMcpController : ControllerBase
 
 internal static class ExternalToolCallerContextFactory
 {
+    internal static async Task<ExternalToolCallerContext> CreateAuthenticatedAsync(HttpContext context)
+    {
+        if (context.User.Identity?.IsAuthenticated != true) throw new UnauthorizedAccessException("MCP 需要授权令牌");
+        if (context.User.FindFirst("TokenPurpose")?.Value != "mcp")
+        {
+            var caller = Create(context.User, context);
+            var clients = await context.RequestServices.GetRequiredService<IExternalToolService>().GetClientsAsync();
+            var client = clients.FirstOrDefault(x => x.ClientId == caller.ClientId && x.Enabled &&
+                (x.ExpireTime == null || x.ExpireTime > DateTime.Now));
+            if (client == null) throw new UnauthorizedAccessException("MCP 客户端已停用或过期");
+            caller.Scopes.IntersectWith(Split(client.Scopes));
+            caller.AllowedLineCodes.IntersectWith(Split(client.AllowedLineCodes));
+            caller.AllowedProjectCodes.IntersectWith(Split(client.AllowedProjectCodes));
+            caller.AllowedDeviceCodes.IntersectWith(Split(client.AllowedDeviceCodes));
+            return caller;
+        }
+        var access = await context.RequestServices.GetRequiredService<ISystemApplicationService>()
+            .GetAccessAsync(context.User, true);
+        var service = context.RequestServices.GetRequiredService<IExternalToolService>();
+        var scopes = access.McpScopes.Contains("*")
+            ? service.GetDefinitions(new ExternalToolCallerContext { IsDirectAccess = true })
+                .Select(x => x.RequiredScope).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : access.McpScopes;
+        return new ExternalToolCallerContext
+        {
+            ClientId = $"user-{access.AppCode}-{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(access.UserId)))[..24]}",
+            UserId = access.UserId,
+            AppCode = access.AppCode,
+            Scopes = scopes,
+            AllResources = access.AllResources,
+            AllowedLineCodes = access.LineCodes,
+            AllowedProjectCodes = access.ProjectCodes,
+            AllowedDeviceCodes = access.DeviceCodes,
+            RemoteIp = context.Connection.RemoteIpAddress?.ToString()
+        };
+    }
     /// <summary>
-    /// 内网 MCP 调用不依赖外部客户端凭据；调用 IP 与固定调用方标识仍会写入审计日志。
+    /// 仅供进程内受信任兼容调用使用；HTTP 入口不使用该方法。
     /// </summary>
     internal static ExternalToolCallerContext CreateDirect(HttpContext context) => new()
     {

@@ -230,6 +230,9 @@ public class AgentModelClient : IAgentModelClient
             messages = BuildReplyMessages(request, runtime)
         };
         var transport = await SendAsync(payload, runtime, "GenerateReply", cancellationToken);
+        var failureKind = GetReplyFailureKind(transport.Content);
+        if (failureKind != AgentReplyFailureKind.None)
+            return Failed(ReplyFailureDescription(failureKind), runtime, failureKind);
         var content = StripDsmlToolCalls(ExtractContent(transport.Content));
         return string.IsNullOrWhiteSpace(content)
             ? Failed("联网模型返回为空", runtime)
@@ -348,8 +351,13 @@ public class AgentModelClient : IAgentModelClient
             }
 
             var usage = ParseUsage(responseText);
+            // HTTP 200 只代表传输成功；空回答或输出截断也应在调用日志中体现为失败。
+            var replyFailure = stage == "GenerateReply"
+                ? GetReplyFailureKind(responseText)
+                : AgentReplyFailureKind.None;
             await RecordInvocationAsync(runtime, stage, clientRequestId, stopwatch.ElapsedMilliseconds,
-                true, (int)response.StatusCode, null, null, traceId, actualModel,
+                replyFailure == AgentReplyFailureKind.None, (int)response.StatusCode, null,
+                replyFailure == AgentReplyFailureKind.None ? null : ReplyFailureDescription(replyFailure), traceId, actualModel,
                 retryCount, fallbackCount, usage);
             return new AgentModelTransportResponse(responseText, traceId, stopwatch.ElapsedMilliseconds);
         }
@@ -817,6 +825,7 @@ public class AgentModelClient : IAgentModelClient
     private static string ReadString(JsonElement element, string name)
     {
         if (!element.TryGetProperty(name, out var value)) return string.Empty;
+        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined) return string.Empty;
         return value.ValueKind == JsonValueKind.String ? value.GetString() ?? string.Empty : value.GetRawText();
     }
 
@@ -839,12 +848,47 @@ public class AgentModelClient : IAgentModelClient
             request.Headers.TryAddWithoutValidation(options.ApiKeyHeader, options.ApiKey);
     }
 
-    private static AgentModelReply Failed(string message, RuntimeAgentOptions options) => new()
+    private static AgentReplyFailureKind GetReplyFailureKind(string responseText)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            if (document.RootElement.TryGetProperty("choices", out var choices) &&
+                choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0)
+            {
+                var choice = choices[0];
+                if (choice.ValueKind == JsonValueKind.Object &&
+                    choice.TryGetProperty("finish_reason", out var reason) && reason.ValueKind == JsonValueKind.String &&
+                    reason.GetString() is "length" or "max_tokens")
+                    return AgentReplyFailureKind.OutputLimit;
+            }
+
+            return string.IsNullOrWhiteSpace(StripDsmlToolCalls(ExtractContent(responseText)))
+                ? AgentReplyFailureKind.EmptyResponse
+                : AgentReplyFailureKind.None;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return AgentReplyFailureKind.InvalidResponse;
+        }
+    }
+
+    private static string ReplyFailureDescription(AgentReplyFailureKind kind) => kind switch
+    {
+        AgentReplyFailureKind.OutputLimit => "模型输出达到长度限制，回答不完整",
+        AgentReplyFailureKind.EmptyResponse => "联网模型返回为空",
+        AgentReplyFailureKind.InvalidResponse => "模型响应格式无效",
+        _ => "模型回复生成失败"
+    };
+
+    private static AgentModelReply Failed(string message, RuntimeAgentOptions options,
+        AgentReplyFailureKind failureKind = AgentReplyFailureKind.Unavailable) => new()
     {
         Success = false,
         Provider = options.Provider,
         Model = options.Model,
-        ErrorMessage = message
+        ErrorMessage = message,
+        FailureKind = failureKind
     };
 
     private static AgentToolSelectionReply SelectionFailed(string message, RuntimeAgentOptions options) => new()

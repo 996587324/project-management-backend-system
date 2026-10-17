@@ -462,6 +462,7 @@ public class EdgeGatewayService : IEdgeGatewayService
     {
         var devices = await Db.Queryable<EdgeDeviceEntity>()
             .Where(x => x.IsDelete == 0)
+            .WhereIF(!string.IsNullOrWhiteSpace(query.DeviceCode), x => x.DeviceCode == query.DeviceCode)
             .WhereIF(!string.IsNullOrWhiteSpace(query.Keyword), x =>
                 x.DeviceCode.Contains(query.Keyword!) || x.DeviceName.Contains(query.Keyword!) ||
                 (x.SiteName != null && x.SiteName.Contains(query.Keyword!)))

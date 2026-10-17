@@ -35,6 +35,7 @@ namespace Service
                 new("Id", user.Id.ToString()),
                 new("Name", user.Name),
                 new("UserType", user.UserType.ToString()),
+                new("TokenPurpose", "portal"),
                 new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N"))
             };
             if (!string.IsNullOrWhiteSpace(sessionId)) claims.Add(new Claim("SessionId", sessionId));

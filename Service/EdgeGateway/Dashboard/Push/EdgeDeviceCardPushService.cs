@@ -150,6 +150,20 @@ public sealed partial class EdgeDeviceCardPushService : IEdgeDeviceCardPushServi
         task.Status = "Processing";
         try
         {
+            if (task.CardId < 0 && task.LineCode.StartsWith("process:", StringComparison.Ordinal))
+            {
+                if (await ProcessBoardPushBridge.IsCurrentAsync(Db, task))
+                {
+                    await EdgeDeviceCardPushConfiguration.ValidateRecipientsAsync(Db, [task.UserId]);
+                    var binding = await Db.Queryable<WeChatClawBotAccountEntity>().FirstAsync(x => x.UserId == task.UserId);
+                    if (binding != null && task.BindingIdentity != null &&
+                        task.BindingIdentity == WeChatClawBotBindingIdentity.Create(binding)) return true;
+                }
+                task.Status = "Cancelled";
+                task.ErrorMessage = "工艺卡片、配置版本、接收人或微信绑定已变更/停用";
+                await CompleteTaskAsync(task);
+                return false;
+            }
             var rule = await Db.Queryable<EdgeDeviceCardPushRuleEntity>().InSingleAsync(task.RuleId);
             var card = await Db.Queryable<EdgeDashboardDeviceCardEntity>().InSingleAsync(task.CardId);
             var field = await Db.Queryable<EdgeDashboardDeviceCardFieldEntity>()

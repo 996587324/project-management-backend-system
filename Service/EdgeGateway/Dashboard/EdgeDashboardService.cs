@@ -151,6 +151,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                 StringComparer.OrdinalIgnoreCase);
         foreach (var field in fieldMap.Values)
         {
+            field.DisplayValue = field.CurrentValue;
             if (!mappingByPath.TryGetValue(field.SourcePath, out var mapping)) continue;
             field.FieldName = mapping.DisplayName;
             field.ValueType = mapping.ValueType;
@@ -159,8 +160,11 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
             field.Unit = mapping.Unit;
             field.Decimals = mapping.Decimals;
             field.MappingJson = mapping.MappingJson;
+            field.DisplayValue = FormatModelFieldValue(field.CurrentValue == null ? null : JToken.FromObject(field.CurrentValue), mapping);
         }
-        return fieldMap.Values.OrderBy(x => x.SourcePath, StringComparer.OrdinalIgnoreCase).ToList();
+        var removedPaths = await EdgeModelFieldCatalogGuard.GetRemovedPathsAsync(Db, modelMark);
+        return fieldMap.Values.Where(x => !removedPaths.Contains(x.SourcePath))
+            .OrderBy(x => x.SourcePath, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
     /// <summary>从模型字段目录读取历史接收字段，供模型级报警映射下拉选择。</summary>
@@ -169,6 +173,8 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         modelMark = NormalizeModelMark(Require(modelMark, "modelMark"));
         var catalogFields = await QueryModelFieldCatalogAsync(modelMark);
         if (catalogFields.Count > 0) return catalogFields;
+        if (await Db.Queryable<EdgeDashboardModelFieldCatalogEntity>()
+            .AnyAsync(x => x.ModelMark == modelMark && x.IsSelectionDisabled)) return catalogFields;
 
         // 兼容升级前已存在的实时快照：首次打开配置时把旧快照字段补写到目录表。
         await HydrateModelFieldCatalogFromSnapshotsAsync(modelMark);
@@ -181,9 +187,10 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     private async Task<List<EdgeDashboardSourceFieldOptionDto>> QueryModelFieldCatalogAsync(string modelMark)
     {
         var records = await Db.Queryable<EdgeDashboardModelFieldCatalogEntity>()
-            .Where(x => x.ModelMark == modelMark && x.IsDelete == 0)
+            .Where(x => x.ModelMark == modelMark && x.IsDelete == 0 && !x.IsSelectionDisabled)
             .ToListAsync();
-        var latestRecords = records
+        var removedPaths = await EdgeModelFieldCatalogGuard.GetRemovedPathsAsync(Db, modelMark);
+        var latestRecords = records.Where(x => !removedPaths.Contains(x.SourcePath))
             .GroupBy(x => x.SourcePath, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(x => x.LastSeenTime).First())
             .OrderBy(x => x.SourcePath)
@@ -287,7 +294,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         }
 
         foreach (var chunk in updates.Chunk(500))
-            await Db.Updateable(chunk.ToList()).ExecuteCommandAsync();
+            await Db.Updateable(chunk.ToList()).IgnoreColumns(x => x.IsSelectionDisabled).ExecuteCommandAsync();
         foreach (var chunk in inserts.Chunk(500))
             await Db.Insertable(chunk.ToList()).ExecuteCommandAsync();
     }
@@ -312,7 +319,10 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<List<EdgeDashboardModelAlarmRuleOutputDto>> SaveModelAlarmRulesAsync(
         EdgeDashboardModelAlarmRuleListSaveDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
         var normalizedRules = await ValidateModelAlarmRulesAsync(dto);
+        await EdgeModelFieldCatalogGuard.RequireModelPathsAsync(Db, dto.ModelMark,
+            normalizedRules.SelectMany(x => new[] { x.SourcePath, x.FaultReasonPath }));
         var now = DateTime.Now;
         var existing = await Db.Queryable<EdgeDashboardModelAlarmRuleEntity>()
             .Where(x => x.DashboardCode == dto.DashboardCode &&
@@ -353,7 +363,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         string dashboardCode,
         string modelMark)
     {
-        dashboardCode = Require(dashboardCode, "看板编码");
+        dashboardCode = SharedModelDictionaryService.StorageScope;
         modelMark = NormalizeModelMark(Require(modelMark, "modelMark"));
         var rows = await Db.Queryable<EdgeDashboardModelFieldDisplayMappingEntity>()
             .Where(x => x.DashboardCode == dashboardCode &&
@@ -368,6 +378,8 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<List<EdgeDashboardModelFieldDisplayMappingOutputDto>> SaveModelFieldDisplayMappingsAsync(
         EdgeDashboardModelFieldDisplayMappingListSaveDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
+        dto.DashboardCode = SharedModelDictionaryService.StorageScope;
         var mappings = await ValidateModelFieldDisplayMappingsAsync(dto);
         var now = DateTime.Now;
         var transaction = await Db.Ado.UseTranAsync(async () =>
@@ -461,7 +473,10 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<EdgeDashboardRobotBindingOutputDto> SaveBindingAsync(
         EdgeDashboardRobotBindingSaveDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
         await ValidateBindingAsync(dto);
+        await EdgeModelFieldCatalogGuard.RequireDevicePathsAsync(Db, dto.TenantMark, dto.DeviceMark,
+            dto.Fields.Select(x => x.SourcePath).Concat(dto.StateRules.SelectMany(x => new[] { x.SourcePath, x.FaultReasonPath })));
         var now = DateTime.Now;
         var existing = dto.Id > 0
             ? await Db.Queryable<EdgeDashboardRobotBindingEntity>()
@@ -550,7 +565,10 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<EdgeDashboardDeviceBindingOutputDto> SaveDeviceBindingAsync(
         EdgeDashboardDeviceBindingSaveDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
         await ValidateDeviceBindingAsync(dto);
+        await EdgeModelFieldCatalogGuard.RequireDevicePathsAsync(Db, dto.TenantMark, dto.SourceDeviceMark,
+            dto.Fields.Select(x => x.SourcePath).Append(dto.StatusSourcePath));
         var now = DateTime.Now;
         var existing = dto.Id > 0
             ? await Db.Queryable<EdgeDashboardDeviceBindingEntity>()
@@ -622,6 +640,8 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<EdgeDashboardLineOutputBindingOutputDto> SaveLineOutputBindingAsync(
         EdgeDashboardLineOutputBindingSaveDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
+        await EdgeModelFieldCatalogGuard.RequireDevicePathsAsync(Db, dto.TenantMark, dto.DeviceMark, [dto.SourcePath]);
         dto.DashboardCode = Require(dto.DashboardCode, "看板编码");
         dto.LineCode = Require(dto.LineCode, "线体编码");
         dto.TenantMark = Require(dto.TenantMark, "租户标识");
@@ -786,7 +806,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<List<EdgeDashboardModelDisplayMappingOutputDto>> GetModelDisplayMappingsAsync(
         string dashboardCode)
     {
-        dashboardCode = Require(dashboardCode, "看板编码");
+        dashboardCode = SharedModelDictionaryService.StorageScope;
         var rows = await Db.Queryable<EdgeDashboardModelDisplayMappingEntity>()
             .Where(x => x.DashboardCode == dashboardCode && x.IsDelete == 0)
             .OrderBy(x => x.Sort)
@@ -799,7 +819,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<EdgeDashboardModelDisplayMappingOutputDto> SaveModelDisplayMappingAsync(
         EdgeDashboardModelDisplayMappingSaveDto dto)
     {
-        dto.DashboardCode = Require(dto.DashboardCode, "看板编码");
+        dto.DashboardCode = SharedModelDictionaryService.StorageScope;
         dto.ModelMark = NormalizeModelMark(Require(dto.ModelMark, "模型标识"));
         dto.DisplayName = Require(dto.DisplayName, "显示名称");
         dto.EquipmentType = Normalize(dto.EquipmentType) ?? "Device";
@@ -816,6 +836,8 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                 .FirstAsync(x => x.Id == dto.Id && x.IsDelete == 0)
             : null;
         if (dto.Id > 0 && existing == null) throw new InvalidOperationException("模型映射不存在");
+        if (existing != null && existing.DashboardCode != SharedModelDictionaryService.StorageScope)
+            throw new InvalidOperationException("历史看板专属映射需人工核对后迁入共享字典，不能直接覆盖");
 
         var now = DateTime.Now;
         var entity = _mapper.Map<EdgeDashboardModelDisplayMappingEntity>(dto);
@@ -841,6 +863,8 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         var row = await Db.Queryable<EdgeDashboardModelDisplayMappingEntity>()
             .FirstAsync(x => x.Id == id && x.IsDelete == 0);
         if (row == null) throw new InvalidOperationException("模型映射不存在");
+        if (row.DashboardCode != SharedModelDictionaryService.StorageScope)
+            throw new InvalidOperationException("不能从共享字典删除历史看板专属映射");
         row.IsDelete = 1;
         row.Enabled = false;
         row.UpdateTime = DateTime.Now;
@@ -864,6 +888,9 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<EdgeDashboardDeviceCardOutputDto> SaveDeviceCardAsync(
         EdgeDashboardDeviceCardSaveDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
+        await EdgeModelFieldCatalogGuard.RequireDevicePathsAsync(Db, dto.TenantMark, dto.DeviceMark,
+            dto.Fields.Select(x => x.SourcePath).Append(dto.StatusSourcePath));
         dto.DashboardCode = Require(dto.DashboardCode, "看板编码");
         dto.LineCode = Require(dto.LineCode, "线体编码");
         dto.CardCode = Require(dto.CardCode, "卡片编码");
@@ -1517,15 +1544,14 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
                             deviceModelMarks.Contains(x.ModelMark) &&
                             x.IsDelete == 0)
                 .ToListAsync();
-        var displayDashboardCodes = bindings.Select(x => x.DashboardCode)
-            .Concat(deviceBindings.Select(x => x.DashboardCode))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var displayModelMarks = snapshots.Select(x => NormalizeModelMark(x.ModelMark ?? string.Empty))
+            .Distinct(StringComparer.Ordinal)
             .ToList();
-        var modelFieldDisplayMappings = displayDashboardCodes.Count == 0 || deviceModelMarks.Count == 0
+        var modelFieldDisplayMappings = displayModelMarks.Count == 0
             ? new List<EdgeDashboardModelFieldDisplayMappingEntity>()
             : await Db.Queryable<EdgeDashboardModelFieldDisplayMappingEntity>()
-                .Where(x => displayDashboardCodes.Contains(x.DashboardCode) &&
-                            deviceModelMarks.Contains(x.ModelMark) &&
+                .Where(x => x.DashboardCode == SharedModelDictionaryService.StorageScope &&
+                            displayModelMarks.Contains(x.ModelMark) &&
                             x.Enabled && x.IsDelete == 0)
                 .ToListAsync();
 
@@ -2053,6 +2079,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
     public async Task<EdgeDashboardLineConfigOutputDto> CopyLineConfigAsync(
         EdgeDashboardLineCopyDto dto)
     {
+        await using var catalogLease = await EdgeModelFieldCatalogGuard.EnterAsync(Db);
         dto.DashboardCode = Require(dto.DashboardCode, "看板编码");
         dto.SourceLineCode = Require(dto.SourceLineCode, "来源线体编码");
         dto.TargetLineCode = Require(dto.TargetLineCode, "新线体编码");
@@ -2897,12 +2924,25 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         dto.ModelMark = NormalizeModelMark(Require(dto.ModelMark, "modelMark"));
         var sourceFields = (await GetModelSourceFieldsAsync(dto.ModelMark))
             .ToDictionary(x => x.SourcePath, StringComparer.OrdinalIgnoreCase);
+        // 已移出字段库的中文映射仍允许保留/编辑；映射不是实际数据绑定，不应拖累其他字段保存。
+        var savedMetadata = await Db.Queryable<EdgeDashboardModelFieldDisplayMappingEntity>()
+            .Where(x => x.ModelMark == dto.ModelMark && x.DashboardCode == dto.DashboardCode && x.IsDelete == 0)
+            .Select(x => new { x.SourcePath, x.ValueType }).ToListAsync();
+        foreach (var item in savedMetadata)
+        {
+            sourceFields.TryAdd(item.SourcePath, new EdgeDashboardSourceFieldOptionDto
+            {
+                SourcePath = item.SourcePath, ValueType = item.ValueType
+            });
+        }
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var mapping in dto.Mappings)
         {
             mapping.SourcePath = Require(mapping.SourcePath, "来源字段");
             if (!sourceFields.ContainsKey(mapping.SourcePath))
                 throw new InvalidOperationException($"模型历史字段目录中不存在字段：{mapping.SourcePath}");
+            // 验证允许忽略大小写检索，但保存目录中的原始路径，运行时 JSON 路径不能被改写。
+            mapping.SourcePath = sourceFields[mapping.SourcePath].SourcePath;
             if (!paths.Add(mapping.SourcePath))
                 throw new InvalidOperationException("同一模型的字段展示映射不能重复");
             mapping.DisplayName = Require(mapping.DisplayName, "展示名称");
@@ -3322,7 +3362,7 @@ public sealed class EdgeDashboardService : IEdgeDashboardService
         string modelMark,
         string sourcePath) =>
         mappings.FirstOrDefault(x =>
-            x.DashboardCode == dashboardCode &&
+            x.DashboardCode == SharedModelDictionaryService.StorageScope &&
             x.ModelMark == modelMark &&
             x.SourcePath == sourcePath);
 

@@ -71,6 +71,9 @@ public sealed class MicrosoftAgentFrameworkRuntime : IAgentFrameworkRuntime
             {
                 Success = false,
                 ErrorMessage = ex.Message,
+                FailureKind = ex.GetBaseException() is AgentReplyGenerationException replyFailure
+                    ? replyFailure.FailureKind
+                    : AgentReplyFailureKind.Unavailable,
                 ToolCalls = context.ToolCalls
             };
         }

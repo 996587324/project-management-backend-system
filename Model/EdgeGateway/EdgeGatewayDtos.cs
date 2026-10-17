@@ -19,6 +19,7 @@ public class EdgePagedResultDto<T>
 /// <summary>边缘设备分页筛选条件。</summary>
 public class EdgeDeviceQueryDto : EdgePageQueryDto
 {
+    public string? DeviceCode { get; set; }
     public string? Keyword { get; set; }
     public bool? Enabled { get; set; }
     public string? OnlineStatus { get; set; }

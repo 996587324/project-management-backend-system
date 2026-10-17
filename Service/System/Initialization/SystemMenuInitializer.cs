@@ -137,6 +137,15 @@ internal sealed class SystemMenuInitializer
         await EnsureAgentChildMenuAsync(
             db,
             rootMenu.MenuId,
+            "ProcessBoardAgent",
+            "process-board",
+            "/agent/process-board",
+            "产线工艺看板助手",
+            8,
+            isHide: true);
+        await EnsureAgentChildMenuAsync(
+            db,
+            rootMenu.MenuId,
             "AgentModelProvider",
             "model-providers",
             "/agent/model-provider",

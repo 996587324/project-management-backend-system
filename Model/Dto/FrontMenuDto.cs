@@ -47,6 +47,9 @@ namespace Model.Dto
     /// </summary>
     public class FrontMenuMetaDto
     {
+        public bool isEnable { get; set; } = true;
+        public int sort { get; set; }
+        public string permissionKey { get; set; } = string.Empty;
         /// <summary>
         /// 菜单标题（对应数据库MetaTitle）
         /// </summary>

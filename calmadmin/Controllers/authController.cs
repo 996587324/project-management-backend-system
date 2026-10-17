@@ -15,11 +15,14 @@ namespace 上传MES.Controllers
         private IUserService _userService;
         private ICustomJWTService _jwtService;
         private readonly IUserActivityService _userActivityService;
-        public authController(IUserService userService, ICustomJWTService jwtService, IUserActivityService userActivityService)
+        private readonly ISystemApplicationService _applications;
+        public authController(IUserService userService, ICustomJWTService jwtService, IUserActivityService userActivityService,
+            ISystemApplicationService applications)
         {
             _userService = userService;
             _jwtService = jwtService;
             _userActivityService = userActivityService;
+            _applications = applications;
         }
         [HttpPost]
         public async Task<IActionResult> login(LoginParams login)
@@ -41,6 +44,7 @@ namespace 上传MES.Controllers
 
                 var sessionId = await _userActivityService.StartSessionAsync(
                     user.Id.ToString(), user.Name, "Password", GetClientIp(), Request.Headers.UserAgent.ToString(), HttpContext.RequestAborted);
+                await _applications.RegisterSessionAsync(user.Name, sessionId);
                 return Ok(new { code = 200, msg = "请求成功", data = new TokenData { token = _jwtService.GetToken(user, sessionId), refreshToken = _jwtService.GenerateRefreshToken() } });
           
           

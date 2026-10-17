@@ -173,6 +173,11 @@ namespace 上传MES.Config
             builder.Services.Configure<PdaOptions>(builder.Configuration.GetSection("PdaOptions"));
             builder.Services.Configure<OAuth2Options>(builder.Configuration.GetSection("OAuth2"));
             builder.Services.Configure<WeChatClawBotOptions>(builder.Configuration.GetSection("WeChatClawBot"));
+            builder.Services.Configure<Model.User.UserAvatarOptions>(builder.Configuration.GetSection("UserAvatar"));
+            builder.Services.Configure<Model.ProcessBoard.ProcessFormulaOptions>(builder.Configuration.GetSection("ProcessBoard:Formula"));
+            builder.Services.AddSingleton<ProcessBoardInitializationState>();
+            builder.Services.AddHostedService<ProcessBoardHostedService>();
+            builder.Services.AddHostedService<ProcessBoardExportHostedService>();
             builder.Services.AddMemoryCache();
             // 模型平台密钥通过 Data Protection 加密后保存到数据库，不允许配置管理接口返回明文。
             builder.Services.AddDataProtection().SetApplicationName("CalmAdmin.AgentModelProvider");
@@ -201,6 +206,7 @@ namespace 上传MES.Config
             builder.Services.AddHostedService<EdgeDashboardExportHostedService>();
             // 延迟维护微信 ClawBot 的会话游标，不能阻塞 Web 服务启动。
             builder.Services.AddHostedService<WeChatClawBotConversationHostedService>();
+            builder.Services.AddHostedService<WeChatClawBotAiHostedService>();
             #region JWT校验
             //增加鉴权逻辑
             JWTTokenOptions tokenOptions = new JWTTokenOptions();
@@ -233,7 +239,7 @@ namespace 上传MES.Config
 
                          return Task.CompletedTask;
                      },
-                     OnTokenValidated = context =>
+                     OnTokenValidated = async context =>
                      {
                          var hasExpiration = context.SecurityToken.ValidTo != DateTime.MinValue;
                          var isPdaToken = string.Equals(
@@ -246,7 +252,19 @@ namespace 上传MES.Config
                              context.Fail("无过期时间的 Token 仅允许用于 PDA");
                          }
 
-                         return Task.CompletedTask;
+                         if (!isPdaToken)
+                         {
+                             try
+                             {
+                                 var purpose = context.Principal?.FindFirst("TokenPurpose")?.Value;
+                                 if (purpose is not ("portal" or "app"))
+                                     throw new UnauthorizedAccessException("请使用统一入口重新登录");
+                                 context.HttpContext.Items[typeof(Model.SystemApplications.ApplicationAccessContext)] =
+                                     await context.HttpContext.RequestServices.GetRequiredService<ISystemApplicationService>()
+                                         .GetAccessAsync(context.Principal!);
+                             }
+                             catch (UnauthorizedAccessException exception) { context.Fail(exception.Message); }
+                         }
                      }
                  };
              })
@@ -266,7 +284,29 @@ namespace 上传MES.Config
                      IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tokenOptions.SecurityKey)),
                      ClockSkew = TimeSpan.FromMinutes(1)
                  };
+                 options.Events = new JwtBearerEvents
+                 {
+                     OnTokenValidated = async context =>
+                     {
+                         if (context.Principal?.FindFirst("TokenPurpose")?.Value == "mcp")
+                         {
+                             try
+                             {
+                                 context.HttpContext.Items[typeof(Model.SystemApplications.ApplicationAccessContext)] =
+                                     await context.HttpContext.RequestServices.GetRequiredService<ISystemApplicationService>()
+                                         .GetAccessAsync(context.Principal, true);
+                             }
+                             catch (UnauthorizedAccessException exception) { context.Fail(exception.Message); }
+                         }
+                         else if (string.IsNullOrEmpty(context.Principal?.FindFirst("client_id")?.Value))
+                         {
+                             context.Fail("不是 MCP 专用令牌");
+                         }
+                     }
+                 };
              });
+            builder.Services.AddAuthorization(options => options.AddPolicy("McpAccess", policy =>
+                policy.AddAuthenticationSchemes(ExternalToolAuthenticationDefaults.Scheme).RequireAuthenticatedUser()));
             #endregion
             //添加跨域策略
             builder.Services.AddCors(options =>
@@ -359,7 +399,9 @@ namespace 上传MES.Config
             builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("EmailOptions"));
             builder.Services.AddScoped<IEmailService, EmailService>();
             builder.Services.AddScoped<IWeChatClawBotService, WeChatClawBotService>();
+            builder.Services.AddScoped<IWeChatClawBotAiService, WeChatClawBotAiService>();
             builder.Services.AddScoped<IEdgeDeviceCardPushService, EdgeDeviceCardPushService>();
+            builder.Services.AddScoped<IEdgeModelFieldCatalogService, EdgeModelFieldCatalogService>();
             var weChatClawBotOptions = builder.Configuration.GetSection("WeChatClawBot").Get<WeChatClawBotOptions>() ?? new WeChatClawBotOptions();
             builder.Services.AddHttpClient(nameof(WeChatClawBotService), client =>
             {

@@ -119,6 +119,7 @@ public sealed class UserActivityService : IUserActivityService
         await EnsureInitializedAsync(cancellationToken);
         await Db.Insertable(new SysUserOperationLogEntity
         {
+            AppCode = Trim(input.AppCode, 32),
             UserId = Trim(input.UserId, 64),
             UserName = Trim(input.UserName, 128) ?? "未知用户",
             SessionId = Trim(input.SessionId, 64),
@@ -194,6 +195,7 @@ public sealed class UserActivityService : IUserActivityService
         var records = await Db.Queryable<SysUserOperationLogEntity>()
             .Where(x => x.HttpMethod == "ButtonClick")
             .WhereIF(!string.IsNullOrWhiteSpace(query.UserName), x => x.UserName.Contains(query.UserName!.Trim()))
+            .WhereIF(!string.IsNullOrWhiteSpace(query.AppCode), x => x.AppCode == query.AppCode!.Trim())
             .WhereIF(!string.IsNullOrWhiteSpace(query.Module), x => x.Module == query.Module!.Trim())
             .WhereIF(!string.IsNullOrWhiteSpace(query.Action), x => x.Action.Contains(query.Action!.Trim()))
             .WhereIF(query.Success.HasValue, x => x.Success == query.Success!.Value)
@@ -267,6 +269,7 @@ public sealed class UserActivityService : IUserActivityService
 
     private static UserOperationLogDto ToOperationDto(SysUserOperationLogEntity entity) => new()
     {
+        AppCode = entity.AppCode,
         Id = entity.Id, UserId = entity.UserId, UserName = entity.UserName, Module = entity.Module,
         Action = entity.Action, HttpMethod = entity.HttpMethod, RequestPath = entity.RequestPath,
         Target = entity.Target, Success = entity.Success, StatusCode = entity.StatusCode,

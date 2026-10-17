@@ -20,7 +20,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
     private readonly IAgentToolRegistryService _registry;
     private readonly IEnumerable<IAgentBusinessToolExecutor> _executors;
     private readonly IEnumerable<IAgentToolAction> _toolActions;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -70,6 +70,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
                 string.Join("；", schemaErrors.Take(8)));
         }
 
+        var channelWrite = AgentChannelExecutionScope.Current != null && tool.IsWriteAction;
         var plan = new AgentExecutionPlanEntity
         {
             ConversationId = request.ConversationId,
@@ -80,9 +81,9 @@ public class AgentToolDispatcher : IAgentToolDispatcher
             UserId = request.UserId,
             ArgumentsJson = normalizedArguments,
             ArgumentsHash = ComputeHash(normalizedArguments),
-            Status = tool.IsWriteAction && tool.RequiresConfirmation ? "PendingConfirmation" : "Created",
+            Status = tool.IsWriteAction && (tool.RequiresConfirmation || channelWrite) ? "PendingConfirmation" : "Created",
             IsWriteAction = tool.IsWriteAction,
-            RequiresConfirmation = tool.RequiresConfirmation,
+            RequiresConfirmation = tool.RequiresConfirmation || channelWrite,
             CorrelationId = Guid.NewGuid().ToString("N"),
             CreateTime = DateTime.Now
         };
@@ -124,6 +125,15 @@ public class AgentToolDispatcher : IAgentToolDispatcher
             return _mapper.Map<AgentToolCallDto>(plan);
         if (plan.Status != "PendingConfirmation")
             return _mapper.Map<AgentToolCallDto>(plan);
+
+        if (AgentChannelExecutionScope.Current is { AllowConfirmation: false })
+            return null;
+
+        if (AgentChannelExecutionScope.Current != null && plan.CreateTime < DateTime.Now.AddMinutes(-10))
+        {
+            await RejectExistingPlanAsync(plan, null, "Expired", "确认计划已超过十分钟，请重新提出操作请求");
+            return _mapper.Map<AgentToolCallDto>(plan);
+        }
 
         var tool = await _registry.GetToolAsync(plan.AgentCode, plan.ToolName);
         if (tool == null || !tool.Enabled)
@@ -201,6 +211,15 @@ public class AgentToolDispatcher : IAgentToolDispatcher
         bool alreadyRunning)
     {
         var stopwatch = Stopwatch.StartNew();
+        if (AgentChannelExecutionScope.Current != null)
+        {
+            var channelError = await ValidatePermissionAsync(tool, userId);
+            if (channelError != null)
+            {
+                await RejectExistingPlanAsync(plan, tool, "PermissionDenied", channelError);
+                return;
+            }
+        }
         if (!alreadyRunning)
         {
             plan.Status = "Running";
@@ -228,7 +247,7 @@ public class AgentToolDispatcher : IAgentToolDispatcher
                 result = await action.ExecuteAsync(
                     arguments.RootElement,
                     context,
-                    cancellationToken: default);
+                    cancellationToken: AgentChannelExecutionScope.Current?.CancellationToken ?? default);
             }
             else
             {
@@ -238,7 +257,8 @@ public class AgentToolDispatcher : IAgentToolDispatcher
                 result = await executor.ExecuteAsync(
                     tool.ActionName,
                     arguments.RootElement,
-                    context);
+                    context,
+                    AgentChannelExecutionScope.Current?.CancellationToken ?? default);
             }
 
             plan.Status = result.Success ? "Succeeded" : result.PartialSuccess ? "PartiallySucceeded" : "Failed";
@@ -330,6 +350,11 @@ public class AgentToolDispatcher : IAgentToolDispatcher
     /// </summary>
     private async Task<string?> ValidatePermissionAsync(AgentToolRegistryEntity tool, string? userId)
     {
+        if (AgentChannelExecutionScope.Current is { } channel)
+        {
+            channel.CancellationToken.ThrowIfCancellationRequested();
+            return await channel.AuthorizeToolAsync(tool);
+        }
         if (string.IsNullOrWhiteSpace(tool.PermissionKey)) return null;
         if (string.IsNullOrWhiteSpace(userId)) return "无法识别当前用户，不能执行受保护的 Agent 工具";
         if (!Db.DbMaintenance.IsAnyTable("sys_user_info")) return "用户权限表不存在，不能执行受保护的 Agent 工具";

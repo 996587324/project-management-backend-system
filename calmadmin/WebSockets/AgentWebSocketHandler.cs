@@ -27,6 +27,16 @@ public sealed class AgentWebSocketHandler
 
     public async Task HandleAsync(HttpContext context)
     {
+        var applications = context.RequestServices.GetRequiredService<ISystemApplicationService>();
+        try
+        {
+            await RequireAgentAccessAsync(applications, context.User);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
         if (!context.WebSockets.IsWebSocketRequest)
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -74,6 +84,16 @@ public sealed class AgentWebSocketHandler
                     continue;
                 }
 
+                // 长连接不能永久保留连接建立时的授权；撤权、退出或过期后不得继续调用工具。
+                try
+                {
+                    await RequireAgentAccessAsync(applications, context.User);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    await SendEventAsync(socket, AgentSocketEvent.Error(envelope.RequestId, exception.Message), context.RequestAborted);
+                    break;
+                }
                 await ProcessMessageAsync(socket, envelope, userId, context.RequestAborted);
             }
         }
@@ -95,6 +115,14 @@ public sealed class AgentWebSocketHandler
                     CancellationToken.None);
             }
         }
+    }
+
+    private static async Task RequireAgentAccessAsync(ISystemApplicationService applications, ClaimsPrincipal principal)
+    {
+        var access = await applications.GetAccessAsync(principal, true);
+        if (access.AppCode is not ("A" or "B") || !access.AllResources ||
+            !new[] { "Agent", "AgentAssistant", "AgentExecutor", "EdgeGatewayAgent", "ProductionDashboardAgent", "ProcessBoardAgent" }.Any(access.HasPermission))
+            throw new UnauthorizedAccessException("Agent 工作接口尚未适配当前系统或数据范围，请使用已授权 MCP 工具");
     }
 
     private async Task ProcessMessageAsync(

@@ -48,6 +48,7 @@ public class UserLoginLogDto
 
 public class UserOperationLogQueryDto
 {
+    public string? AppCode { get; set; }
     public string? UserName { get; set; }
     public string? Module { get; set; }
     public string? Action { get; set; }
@@ -70,6 +71,7 @@ public class UserOperationEventSaveDto
 
 public class UserOperationLogDto
 {
+    public string? AppCode { get; set; }
     public long Id { get; set; }
     public string? UserId { get; set; }
     public string UserName { get; set; } = string.Empty;

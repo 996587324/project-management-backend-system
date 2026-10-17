@@ -5,6 +5,8 @@ namespace Interface;
 
 public interface IWeChatClawBotService
 {
+    Task<WeChatClawBotDeliveryDto> SendAiMessageAsync(string userId, string content, string idempotencyKey,
+        string bindingIdentity, CancellationToken cancellationToken = default);
     Task<WeChatClawBotDeliveryDto> SendSystemMessageAsync(string userId, string content, string idempotencyKey,
         string taskId, CancellationToken cancellationToken = default, string? expectedBindingIdentity = null);
     Task<WeChatClawBotAccountDto> GetMyAccountAsync(string userId, string userName, CancellationToken cancellationToken = default);

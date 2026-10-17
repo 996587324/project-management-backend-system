@@ -22,6 +22,7 @@ public static class WeChatClawBotDatabaseInitializer
             WeChatClawBotConversationEntity,
             WeChatClawBotDeliveryEntity>();
         db.CodeFirst.InitTables<WeChatClawBotInboundMessageEntity>();
+        WeChatClawBotAiSchema.Initialize(db);
     }
 
     private static void EnsureNullableColumns<TEntity>(ISqlSugarClient db)

@@ -29,5 +29,6 @@ public sealed class AgentFrameworkRunResult
     public bool Success { get; set; }
     public string Reply { get; set; } = string.Empty;
     public string? ErrorMessage { get; set; }
+    public AgentReplyFailureKind FailureKind { get; set; }
     public List<AgentToolCallDto> ToolCalls { get; set; } = [];
 }

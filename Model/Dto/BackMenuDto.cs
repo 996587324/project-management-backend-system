@@ -18,6 +18,9 @@ namespace Model.Dto
         /// </summary>
         public int Id { get; set; } = 0;
 
+        /// <summary>B 独立菜单父级 ID；为空时兼容旧客户端 ActivePath。</summary>
+        public int? ParentId { get; set; }
+
         /// <summary>
         /// 路由名称
         /// </summary>

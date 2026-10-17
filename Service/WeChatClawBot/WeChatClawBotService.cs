@@ -25,6 +25,7 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly WeChatClawBotOptions _options;
     private readonly IDataProtector _tokenProtector;
+    private readonly IWeChatClawBotAiService? _ai;
 
     private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
@@ -32,12 +33,14 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         SqlSugarScope dbScope,
         IHttpClientFactory httpClientFactory,
         IOptions<WeChatClawBotOptions> options,
-        IDataProtectionProvider dataProtectionProvider)
+        IDataProtectionProvider dataProtectionProvider,
+        IWeChatClawBotAiService? ai = null)
     {
         _dbScope = dbScope;
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
         _tokenProtector = dataProtectionProvider.CreateProtector("CalmAdmin.WeChatClawBot.BotToken.v1");
+        _ai = ai;
     }
 
     public async Task<WeChatClawBotAccountDto> GetMyAccountAsync(
@@ -245,6 +248,7 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
     public async Task UnbindAsync(string userId, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
+        if (_ai != null) await _ai.DisconnectAsync(userId);
         var account = await Db.Queryable<WeChatClawBotAccountEntity>().FirstAsync(x => x.UserId == userId);
         if (account == null) return;
         account.BotToken = null;
@@ -283,6 +287,7 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
     public async Task SetAdminDisabledAsync(string userId, bool disabled, CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
+        if (_ai != null && disabled) await _ai.DisconnectAsync(userId);
         var account = await Db.Queryable<WeChatClawBotAccountEntity>().FirstAsync(x => x.UserId == userId)
             ?? throw new InvalidOperationException("未找到该用户的 ClawBot 绑定。");
         account.AdminDisabled = disabled;
@@ -452,6 +457,8 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         if (dto.RecipientCodes.Count == 0) throw new InvalidOperationException("至少指定一位接收用户。");
         if (string.IsNullOrWhiteSpace(dto.IdempotencyKey)) throw new InvalidOperationException("idempotencyKey 不能为空。");
         var source = Trim(dto.Source, 32) ?? "MCP";
+        if (source.Equals("AI", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("AI 为系统保留消息来源，外部推送不能使用该来源。");
         var results = new List<WeChatClawBotDeliveryDto>();
         foreach (var userId in dto.RecipientCodes.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase))
         {
@@ -475,6 +482,8 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         await EnsureInitializedAsync(cancellationToken);
         var original = await Db.Queryable<WeChatClawBotDeliveryEntity>().InSingleAsync(deliveryId)
             ?? throw new InvalidOperationException("投递记录不存在。");
+        if (original.Source == "AI")
+            throw new InvalidOperationException("AI 回复不支持脱离原授权任务重试，请在微信重新发送请求。");
         if (original.Status != "Failed") throw new InvalidOperationException("仅失败的投递记录可以重试。");
         var retryKey = $"retry:{original.Id}:{original.AttemptCount + 1}";
         return await SendOneAsync(
@@ -611,7 +620,7 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
                 if (parsedTime.Year >= 1753) messageTime = parsedTime;
             }
 
-            await Db.Insertable(new WeChatClawBotInboundMessageEntity
+            var inbound = new WeChatClawBotInboundMessageEntity
             {
                 UserId = account.UserId,
                 MessageKey = key,
@@ -621,7 +630,14 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
                 Content = content,
                 MessageTime = messageTime,
                 ReceivedTime = receivedTime
-            }).ExecuteCommandAsync();
+            };
+            if (_ai != null)
+                await _ai.HandleInboundAsync(account, inbound);
+            else
+            {
+                inbound.Content = WeChatClawBotAiPolicy.Redact(inbound.Content);
+                await Db.Insertable(inbound).ExecuteCommandAsync();
+            }
         }
     }
 
@@ -669,6 +685,24 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         var messageType = types.Count == 1 ? types.Single() : types.Count > 1 ? "Mixed" : "Other";
         var content = string.Join("\n", parts.Where(part => !string.IsNullOrWhiteSpace(part)));
         return (messageType, string.IsNullOrWhiteSpace(content) ? "[无文本内容]" : content);
+    }
+
+    public async Task<WeChatClawBotDeliveryDto> SendAiMessageAsync(string userId, string content,
+        string idempotencyKey, string bindingIdentity, CancellationToken cancellationToken = default)
+    {
+        await SystemSendGate.WaitAsync(cancellationToken);
+        try
+        {
+            var existing = await Db.Queryable<WeChatClawBotDeliveryEntity>()
+                .FirstAsync(x => x.UserId == userId && x.Source == "AI" && x.IdempotencyKey == idempotencyKey);
+            if (existing != null) return ToDeliveryDto(existing);
+            return await SendOneAsync(userId, content, "AI", idempotencyKey, idempotencyKey,
+                cancellationToken, false, classifyUncertainResult: true, expectedBindingIdentity: bindingIdentity);
+        }
+        finally
+        {
+            SystemSendGate.Release();
+        }
     }
 
     private async Task<WeChatClawBotDeliveryDto> SendOneAsync(
@@ -725,6 +759,15 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         var providerAccepted = false;
         try
         {
+            var isLimit = source == "AI" && _ai != null && await _ai.ValidateReplyAsync(userId, idempotencyKey!);
+            if (_ai != null) await _ai.ReserveSendAsync(account, !isLimit, cancellationToken);
+            if (source == "AI" && _ai != null) await _ai.ValidateReplyAsync(userId, idempotencyKey!);
+            var currentAccount = await Db.Queryable<WeChatClawBotAccountEntity>().FirstAsync(x => x.UserId == userId);
+            if (currentAccount == null || currentAccount.Status != "Bound" || currentAccount.AdminDisabled ||
+                currentAccount.BotToken != account.BotToken ||
+                WeChatClawBotBindingIdentity.Create(currentAccount) != WeChatClawBotBindingIdentity.Create(account) ||
+                requireMcpPushPermission && !currentAccount.McpPushEnabled)
+                throw new InvalidOperationException("微信绑定或发送授权已变更，本次发送已取消。");
             var result = await SendAuthenticatedAsync(account, "/ilink/bot/sendmessage", new
             {
                 msg = new
@@ -795,6 +838,7 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         account.BaseUrl = Trim(FindString(response, "baseurl", "base_url"), 256) ?? _options.BaseUrl.TrimEnd('/');
         if (string.IsNullOrWhiteSpace(account.BotId) || string.IsNullOrWhiteSpace(account.ILinkUserId))
             throw new InvalidOperationException("微信未返回完整账号信息，请重新扫码绑定。");
+        if (_ai != null) await _ai.DisconnectAsync(session.UserId);
         account.Status = account.AdminDisabled ? "Disabled" : "Bound";
         account.LastOnlineTime = DateTime.Now;
         account.LastError = null;
@@ -896,6 +940,8 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         {
             if (_initialized) return;
             using var initializationDb = Db.CopyNew();
+            await using var schemaLock = await WeChatClawBotAiLock.TryEnterAsync(initializationDb, "ClawBotAi:schema", 10000)
+                ?? throw new InvalidOperationException("微信数据表正在初始化，请稍后重试");
             WeChatClawBotDatabaseInitializer.Initialize(initializationDb);
             _initialized = true;
         }

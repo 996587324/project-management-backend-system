@@ -1,4 +1,4 @@
-    using System.Diagnostics;
+using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -19,8 +19,8 @@ namespace Service;
 
 /// <summary>
 /// 外部工具的唯一业务适配层。
-/// 不调用 AgentDispatcher，也不公开配置、原始报文、删除或任何写入动作。
-/// 当前服务为内网直连读取模式，所有调用仍写入审计日志。
+/// 不调用 AgentDispatcher，也不公开原始报文或删除动作。
+/// 按调用者工具范围和业务资源授权执行；写操作必须确认并先记录审计。
 /// </summary>
 public sealed class ExternalToolService : IExternalToolService
 {
@@ -35,7 +35,7 @@ public sealed class ExternalToolService : IExternalToolService
     private readonly SemaphoreSlim _initializeLock = new(1, 1);
     private bool _initialized;
 
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     private static readonly IReadOnlyDictionary<string, ExternalToolDefinition> Definitions =
         new Dictionary<string, ExternalToolDefinition>(StringComparer.OrdinalIgnoreCase)
@@ -245,8 +245,23 @@ public sealed class ExternalToolService : IExternalToolService
     public IReadOnlyList<ExternalToolDefinitionDto> GetDefinitions(ExternalToolCallerContext caller) =>
         Definitions.Values
             .Where(definition => caller.IsDirectAccess || caller.Scopes.Contains(definition.RequiredScope))
-            .Select(definition => definition.ToDto())
+            .Where(definition => caller.IsDirectAccess || caller.AllResources ||
+                !definition.Name.StartsWith("user.") && !definition.Name.StartsWith("clawbot."))
+            .Select(definition => ToAuthorizedDto(definition, caller))
             .ToList();
+
+    private static ExternalToolDefinitionDto ToAuthorizedDto(ExternalToolDefinition definition, ExternalToolCallerContext caller)
+    {
+        var dto = definition.ToDto();
+        if (caller.IsDirectAccess || caller.AllResources || definition.IsWrite) return dto;
+        var schema = System.Text.Json.Nodes.JsonNode.Parse(dto.InputSchema.GetRawText())!.AsObject();
+        var properties = schema["properties"]!.AsObject();
+        properties["scopeCurrent"] = new System.Text.Json.Nodes.JsonObject { ["type"] = "integer", ["minimum"] = 1, ["description"] = "授权资源分页页码，默认 1" };
+        properties["scopeSize"] = new System.Text.Json.Nodes.JsonObject { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 50, ["description"] = "每次聚合的授权资源数量，默认 20" };
+        dto.InputSchema = JsonSerializer.SerializeToElement(schema);
+        dto.Description += " 不传资源编码时按授权子集分页查询，绝不查询未授权资源。";
+        return dto;
+    }
 
     public async Task<ExternalToolExecutionResultDto> ExecuteAsync(
         string toolName,
@@ -255,6 +270,7 @@ public sealed class ExternalToolService : IExternalToolService
         string requestId,
         CancellationToken cancellationToken = default)
     {
+        using var operation = DatabaseOperationScope.Begin(_dbScope);
         await EnsureInitializedAsync();
         var stopwatch = Stopwatch.StartNew();
         ExternalToolExecutionResultDto result;
@@ -268,7 +284,13 @@ public sealed class ExternalToolService : IExternalToolService
             if (definition.IsWrite)
                 EnsureWriteConfirmed(arguments);
 
-            var data = await ExecuteCoreAsync(definition.Name, arguments, caller, cancellationToken);
+            if (!caller.IsDirectAccess && !caller.AllResources &&
+                (definition.Name.StartsWith("user.") || definition.Name.StartsWith("clawbot.")))
+                throw new UnauthorizedAccessException("该工具需要独立的用户或推送对象授权，不能沿用线体/项目资源权限");
+            if (definition.IsWrite)
+                await WriteAuditAsync(caller, definition.Name, requestId, arguments, "Attempted", null, 0,
+                    stopwatch.ElapsedMilliseconds, required: true);
+            var data = await ExecuteScopedAsync(definition.Name, arguments, caller, cancellationToken);
             result = new ExternalToolExecutionResultDto { Success = true, Message = "success", Data = data };
             await WriteAuditAsync(caller, definition.Name, requestId, arguments, "Success", null, CountResult(data), stopwatch.ElapsedMilliseconds);
         }
@@ -307,7 +329,10 @@ public sealed class ExternalToolService : IExternalToolService
                 var bootstrap = await _dashboardService.GetBootstrapAsync("production-dashboard", false);
                 var runtimes = new List<EdgeDashboardLineRuntimeDto>();
                 foreach (var line in bootstrap.Lines)
+                {
+                    if (!caller.IsDirectAccess && !caller.AllResources && !caller.AllowedLineCodes.Contains(line.LineCode)) continue;
                     runtimes.Add(await _dashboardService.GetLineRuntimeAsync(line.LineCode));
+                }
                 return new { scope = "all", totalLines = runtimes.Count, lines = runtimes };
             }
             case "production.line-output":
@@ -322,7 +347,10 @@ public sealed class ExternalToolService : IExternalToolService
                 var bootstrap = await _dashboardService.GetBootstrapAsync("production-dashboard", false);
                 var outputs = new List<EdgeDashboardLineOutputDto>();
                 foreach (var line in bootstrap.Lines)
+                {
+                    if (!caller.IsDirectAccess && !caller.AllResources && !caller.AllowedLineCodes.Contains(line.LineCode)) continue;
                     outputs.Add(await _dashboardService.GetLineOutputAsync(line.LineCode));
+                }
                 return new
                 {
                     scope = "all",
@@ -415,6 +443,8 @@ public sealed class ExternalToolService : IExternalToolService
                 }
 
                 var projects = await _projectManageService.GetProjectListAsync();
+                if (!caller.IsDirectAccess && !caller.AllResources)
+                    projects = projects.Where(x => caller.AllowedProjectCodes.Contains(x.ProjectCode)).ToList();
                 return new
                 {
                     scope = "all",
@@ -455,6 +485,7 @@ public sealed class ExternalToolService : IExternalToolService
                 if (!string.IsNullOrWhiteSpace(deviceCode)) EnsureDeviceAllowed(caller, deviceCode);
                 var page = await _edgeGatewayService.GetDevicePageAsync(new EdgeDeviceQueryDto
                 {
+                    DeviceCode = deviceCode,
                     OnlineStatus = GetOptionalString(arguments, "status"),
                     Current = GetBoundedInt(arguments, "current", 1, 1, 1000),
                     Size = GetBoundedInt(arguments, "size", 100, 1, 100)
@@ -556,6 +587,53 @@ public sealed class ExternalToolService : IExternalToolService
         }
     }
 
+    /// <summary>未提供编码时遍历授权子集；不把空参数解释为读取整个数据库。</summary>
+    private async Task<object?> ExecuteScopedAsync(string toolName, JsonElement arguments,
+        ExternalToolCallerContext caller, CancellationToken cancellationToken)
+    {
+        if (toolName == "device-card.alerts.ack" && !caller.IsDirectAccess && !caller.AllResources)
+        {
+            var ids = GetRequiredLongList(arguments, "alertIds");
+            var alertRecords = await Db.Queryable<EdgeDashboardDeviceCardAlertRecordEntity>()
+                .Where(x => ids.Contains(x.Id)).ToListAsync();
+            if (alertRecords.Count != ids.Distinct().Count() || alertRecords.Any(x => !caller.AllowedLineCodes.Contains(x.LineCode)))
+                throw new UnauthorizedAccessException("确认列表包含不存在或未授权的告警");
+        }
+        if (caller.IsDirectAccess || caller.AllResources)
+            return await ExecuteCoreAsync(toolName, arguments, caller, cancellationToken);
+        var parameter = toolName switch
+        {
+            "production.line-runtime" or "production.line-output" or "production.fault-summary" or
+                "device-card.runtime" or "device-card.history" or "device-card.alerts" or "device-card.alerts.claim" => "lineCode",
+            "project.get" or "project.tasks" => "projectCode",
+            "edge.device-status" or "edge.queue-status" or "edge.events" or "edge.overview" => "deviceCode",
+            _ => null
+        };
+        if (parameter == null || !string.IsNullOrWhiteSpace(GetOptionalString(arguments, parameter)))
+            return await ExecuteCoreAsync(toolName, arguments, caller, cancellationToken);
+        if (toolName == "device-card.alerts.claim")
+            throw new ArgumentException("认领操作必须明确指定已授权的 lineCode");
+        var permitted = (parameter switch
+        {
+            "lineCode" => caller.AllowedLineCodes,
+            "projectCode" => caller.AllowedProjectCodes,
+            _ => caller.AllowedDeviceCodes
+        }).Order(StringComparer.OrdinalIgnoreCase).ToList();
+        var current = GetBoundedInt(arguments, "scopeCurrent", 1, 1, 10000);
+        var size = GetBoundedInt(arguments, "scopeSize", 20, 1, 50);
+        var records = new List<object>();
+        foreach (var code in permitted.Skip((current - 1) * size).Take(size))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var scopedArguments = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
+            scopedArguments[parameter] = code;
+            var result = await ExecuteCoreAsync(toolName == "edge.overview" ? "edge.device-status" : toolName,
+                JsonSerializer.SerializeToElement(scopedArguments), caller, cancellationToken);
+            records.Add(new { resourceCode = code, data = result });
+        }
+        return new { scope = "authorized", totalResources = permitted.Count, scopeCurrent = current, scopeSize = size, records };
+    }
+
     private async Task EnsureInitializedAsync()
     {
         if (_initialized) return;
@@ -622,13 +700,15 @@ public sealed class ExternalToolService : IExternalToolService
             """);
     }
 
-    private async Task WriteAuditAsync(ExternalToolCallerContext caller, string toolName, string requestId, JsonElement arguments, string status, string? message, int resultCount, long durationMs)
+    private async Task WriteAuditAsync(ExternalToolCallerContext caller, string toolName, string requestId, JsonElement arguments, string status, string? message, int resultCount, long durationMs, bool required = false)
     {
         try
         {
             await Db.Insertable(new ExternalToolAccessLogEntity
             {
                 ClientId = caller.ClientId,
+                UserId = caller.UserId,
+                AppCode = caller.AppCode,
                 ToolName = toolName ?? string.Empty,
                 RequestId = requestId,
                 ArgumentHash = Hash(arguments.GetRawText()),
@@ -642,7 +722,8 @@ public sealed class ExternalToolService : IExternalToolService
         }
         catch
         {
-            // 审计失败不得影响只读查询，但数据库运维应从服务日志中关注该问题。
+            if (required) throw new InvalidOperationException("无法记录写操作审计，本次写入未执行");
+            // 只读查询和完成记录允许审计故障降级；写入开始前必须存在 Attempted 记录。
         }
     }
 
@@ -690,19 +771,19 @@ public sealed class ExternalToolService : IExternalToolService
 
     private static void EnsureLineAllowed(ExternalToolCallerContext caller, string lineCode)
     {
-        if (caller.IsDirectAccess) return;
+        if (caller.IsDirectAccess || caller.AllResources) return;
         if (!caller.AllowedLineCodes.Contains(lineCode)) throw new UnauthorizedAccessException("客户端未获该线体数据授权");
     }
 
     private static void EnsureProjectAllowed(ExternalToolCallerContext caller, string projectCode)
     {
-        if (caller.IsDirectAccess) return;
+        if (caller.IsDirectAccess || caller.AllResources) return;
         if (!caller.AllowedProjectCodes.Contains(projectCode)) throw new UnauthorizedAccessException("客户端未获该项目数据授权");
     }
 
     private static void EnsureDeviceAllowed(ExternalToolCallerContext caller, string deviceCode)
     {
-        if (caller.IsDirectAccess) return;
+        if (caller.IsDirectAccess || caller.AllResources) return;
         if (!caller.AllowedDeviceCodes.Contains(deviceCode)) throw new UnauthorizedAccessException("客户端未获该边缘设备数据授权");
     }
 

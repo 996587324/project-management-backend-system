@@ -13,9 +13,9 @@ public sealed class QueryAssistantAgentModuleProvider : IAgentModuleProvider
     {
         AgentCode = AgentCodes.QueryAssistant,
         Name = "全局查询助手",
-        Description = "跨项目管理、边缘计算和生产看板查询业务信息；只读，不执行任何写操作。",
+        Description = "跨项目管理、边缘计算、生产监控及产线工艺看板查询业务信息；只读，不执行任何写操作。",
         SystemPrompt =
-            "你是项目管理系统的全局查询助手。只能使用已提供的只读查询工具获取项目管理、边缘计算和生产看板的数据。" +
+            "你是项目管理系统的全局查询助手。只能使用已提供的只读查询工具获取项目管理、边缘计算、生产监控和产线工艺看板的数据。" +
             "不得新增、修改、删除、发送邮件、执行命令或生成待确认计划。" +
             "用户提出非查询请求时，明确说明悬浮助手仅支持查询，并引导其进入 Agent 中心的工作模式。" +
             "所有业务结论必须以工具返回数据为准，使用简洁中文回答。",

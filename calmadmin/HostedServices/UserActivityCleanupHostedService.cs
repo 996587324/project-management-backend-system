@@ -7,11 +7,14 @@ public sealed class UserActivityCleanupHostedService : BackgroundService
 {
     private readonly IUserActivityService _service;
     private readonly ILogger<UserActivityCleanupHostedService> _logger;
+    private readonly ISystemApplicationService _applications;
 
-    public UserActivityCleanupHostedService(IUserActivityService service, ILogger<UserActivityCleanupHostedService> logger)
+    public UserActivityCleanupHostedService(IUserActivityService service, ILogger<UserActivityCleanupHostedService> logger,
+        ISystemApplicationService applications)
     {
         _service = service;
         _logger = logger;
+        _applications = applications;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -21,6 +24,7 @@ public sealed class UserActivityCleanupHostedService : BackgroundService
             try
             {
                 await _service.CleanupAsync(stoppingToken);
+                await _applications.CleanupExpiredSessionsAsync(stoppingToken);
             }
             catch (Exception exception)
             {

@@ -35,6 +35,7 @@ public sealed class UserActivityController : ControllerBase
     public async Task<IActionResult> Logout()
     {
         await _service.EndSessionAsync(GetSessionId(), GetUserKey(), HttpContext.RequestAborted);
+        await HttpContext.RequestServices.GetRequiredService<ISystemApplicationService>().RevokeSessionAsync(User);
         return Ok(new { code = 200, msg = "会话已结束", data = true });
     }
 
@@ -48,6 +49,7 @@ public sealed class UserActivityController : ControllerBase
 
         await _service.RecordOperationAsync(new UserOperationAuditInput
         {
+            AppCode = User.FindFirst("AppCode")?.Value,
             UserId = GetUserKey(),
             UserName = User.FindFirst("Name")?.Value ?? User.Identity?.Name ?? "未知用户",
             SessionId = GetSessionId(),

@@ -82,7 +82,7 @@ public sealed class EdgeGatewayDatabaseInitializer : IEdgeGatewayDatabaseInitial
                 EdgeDashboardDeviceFieldBindingEntity>());
             RunInitializationStep(nameof(EdgeDashboardModelDisplayMappingEntity), () => _db.CodeFirst.InitTables<EdgeDashboardModelDisplayMappingEntity>());
             await EnsureDashboardModelDisplayMappingsAsync(cancellationToken);
-            RunInitializationStep(nameof(EdgeDashboardModelFieldCatalogEntity), () => _db.CodeFirst.InitTables<EdgeDashboardModelFieldCatalogEntity>());
+            RunInitializationStep(nameof(EdgeDashboardModelFieldCatalogEntity), () => EdgeModelFieldCatalogSchema.Initialize(_db));
             RunInitializationStep(nameof(EdgeDashboardModelFieldDisplayMappingEntity), () => _db.CodeFirst.InitTables<EdgeDashboardModelFieldDisplayMappingEntity>());
             RunInitializationStep(nameof(EdgeDashboardModelStatePriorityEntity), () => _db.CodeFirst.InitTables<EdgeDashboardModelStatePriorityEntity>());
             RunInitializationStep(nameof(EdgeDashboardRobotDailyStatisticEntity), () => _db.CodeFirst.InitTables<EdgeDashboardRobotDailyStatisticEntity,

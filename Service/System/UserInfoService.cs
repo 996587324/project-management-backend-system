@@ -19,7 +19,7 @@ namespace Service
 
             if (!string.IsNullOrWhiteSpace(userKey))
             {
-                var current = await query.FirstAsync(x => x.UserId == userKey || x.UserName == userKey);
+                var current = await query.FirstAsync(x => x.Enabled && (x.UserId == userKey || x.UserName == userKey));
                 if (current != null) return current;
             }
 
@@ -125,7 +125,8 @@ namespace Service
             entity.Enabled = input.enabled;
             entity.UpdateTime = DateTime.Now;
 
-            return await _db.GetConnection("calmadmin").Updateable(entity).ExecuteCommandAsync() > 0;
+            return await _db.GetConnection("calmadmin").Updateable(entity)
+                .IgnoreColumns(x => x.AvatarFileKey).ExecuteCommandAsync() > 0;
         }
 
         public async Task<bool> DeleteUserAsync(string id)
@@ -147,7 +148,8 @@ namespace Service
             entity.PermissionKeys = string.Join(",", input.permissionKeys ?? new List<string>());
             entity.Roles = string.Join(",", NormalizeRoles(input.roleCodes ?? input.roles));
             entity.UpdateTime = DateTime.Now;
-            return await _db.GetConnection("calmadmin").Updateable(entity).ExecuteCommandAsync() > 0;
+            return await _db.GetConnection("calmadmin").Updateable(entity)
+                .IgnoreColumns(x => x.AvatarFileKey).ExecuteCommandAsync() > 0;
         }
 
         private async Task<Dictionary<string, string>> GetRoleNameMapAsync()

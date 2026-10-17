@@ -48,4 +48,15 @@ public class AgentModelReply
     public string Provider { get; set; } = string.Empty;
     public string Model { get; set; } = string.Empty;
     public string? ErrorMessage { get; set; }
+    public AgentReplyFailureKind FailureKind { get; set; }
+}
+
+/// <summary>可安全传递到渠道的回复失败分类，不包含模型响应正文。</summary>
+public enum AgentReplyFailureKind
+{
+    None,
+    OutputLimit,
+    EmptyResponse,
+    InvalidResponse,
+    Unavailable
 }

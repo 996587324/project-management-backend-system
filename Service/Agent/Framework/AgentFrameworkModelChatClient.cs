@@ -77,6 +77,8 @@ internal sealed class AgentFrameworkModelChatClient : IChatClient
 
         if (!selection.Success)
         {
+            if (AgentChannelExecutionScope.Current != null)
+                throw new InvalidOperationException("模型暂时无法选择工具");
             return CreateTextResponse(selection.ErrorMessage ?? "模型暂时无法选择可用工具");
         }
 
@@ -110,6 +112,10 @@ internal sealed class AgentFrameworkModelChatClient : IChatClient
             ToolResults = _context.BuildToolResults()
         }, cancellationToken);
 
+        if (!reply.Success || string.IsNullOrWhiteSpace(reply.Content))
+            throw new AgentReplyGenerationException(reply.FailureKind == AgentReplyFailureKind.None
+                ? AgentReplyFailureKind.EmptyResponse
+                : reply.FailureKind);
         _context.FinalReply = reply.Success && !string.IsNullOrWhiteSpace(reply.Content)
             ? reply.Content.Trim()
             : reply.ErrorMessage ?? "暂时无法生成回答";

@@ -42,6 +42,9 @@ namespace 上传MES.Config
 
             // 2. 嵌套映射：SysMenu → FrontMenuMetaDto（Meta字段单独映射）
             CreateMap<sys_menu, FrontMenuMetaDto>()
+                .ForMember(dest => dest.isEnable, opt => opt.MapFrom(src => src.Status == true))
+                .ForMember(dest => dest.sort, opt => opt.MapFrom(src => src.Sort ?? 0))
+                .ForMember(dest => dest.permissionKey, opt => opt.MapFrom(src => src.MenuName))
                 .ForMember(dest => dest.title, opt => opt.MapFrom(src => src.MetaTitle))
                 .ForMember(dest => dest.icon, opt => opt.MapFrom(src => src.MetaIcon))
                 .ForMember(dest => dest.keepAlive, opt => opt.MapFrom(src => src.MetaKeepAlive))
@@ -103,7 +106,9 @@ namespace 上传MES.Config
                         : src.Status))
                 .ForMember(dest => dest.RequiresConfirmation, opt => opt.MapFrom(src =>
                     src.RequiresConfirmation && src.Status == "PendingConfirmation"))
-                .ForMember(dest => dest.Confirmed, opt => opt.MapFrom(src => src.ConfirmTime.HasValue));
+                // 历史实体的 ConfirmTime 有初始化值；必须存在真实确认人，不能仅凭时间认定已确认。
+                .ForMember(dest => dest.Confirmed, opt => opt.MapFrom(src =>
+                    src.ConfirmTime.HasValue && !string.IsNullOrWhiteSpace(src.ConfirmedBy)));
 
             // Agent 模型平台映射：密钥字段由专用保护服务处理，不允许 AutoMapper 复制。
             CreateMap<AgentModelProviderSaveDto, AgentModelProviderEntity>(MemberList.None)

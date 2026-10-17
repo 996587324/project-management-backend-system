@@ -238,6 +238,9 @@ public class EdgeDashboardModelFieldCatalogEntity
     [SugarColumn(Length = 128, IsNullable = true)]
     public string? SampleDeviceMark { get; set; }
     public long SeenCount { get; set; } = 1;
+    /// <summary>人工移出候选库；接收/补齐更新不得覆盖此状态。</summary>
+    [SugarColumn(IsNullable = false, DefaultValue = "0")]
+    public bool IsSelectionDisabled { get; set; }
     public byte IsDelete { get; set; }
     public DateTime FirstSeenTime { get; set; } = DateTime.Now;
     public DateTime LastSeenTime { get; set; } = DateTime.Now;

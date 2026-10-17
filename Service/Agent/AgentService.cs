@@ -18,7 +18,7 @@ public class AgentService : IAgentService
     private readonly IAgentToolDispatcher _dispatcher;
     private readonly IAgentFrameworkRuntime _frameworkRuntime;
     private readonly IEmailService _emailService;
-    private ISqlSugarClient Db => _dbScope.GetConnectionScope("calmadmin");
+    private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -170,10 +170,13 @@ public class AgentService : IAgentService
                 ConversationId = conversation.Id,
                 History = history,
                 Tools = []
-            });
+            }, AgentChannelExecutionScope.Current?.CancellationToken ?? default);
+            var chatFailureFeedback = AgentReplyFailureFeedback.Build(frameworkResult.FailureKind, [], false);
+            if (AgentChannelExecutionScope.Current != null && !frameworkResult.Success)
+                throw new AgentChannelExecutionException(false, chatFailureFeedback + "\n本次未扣除对话额度。");
             var chatReplyText = frameworkResult.Success && !string.IsNullOrWhiteSpace(frameworkResult.Reply)
                 ? frameworkResult.Reply.Trim()
-                : frameworkResult.ErrorMessage ?? "暂时无法回答该问题";
+                : chatFailureFeedback;
             await AddMessageAsync(conversation.Id, "assistant", chatReplyText);
             await TouchConversationAsync(conversation.Id);
             await ReportProgressAsync(progress, "saving_result", "回答已生成，正在保存会话", conversation.Id);
@@ -218,9 +221,14 @@ public class AgentService : IAgentService
                 "executing_tool",
                 $"正在处理：{tool.Title}",
                 conversation.Id)
-        });
+        }, AgentChannelExecutionScope.Current?.CancellationToken ?? default);
 
         var calls = frameworkRun.ToolCalls;
+        var mayHaveWriteEffects = AgentReplyFailureFeedback.MayHaveWriteEffects(calls, toolDefinitions);
+        var failureFeedback = AgentReplyFailureFeedback.Build(frameworkRun.FailureKind, calls, mayHaveWriteEffects);
+        if (AgentChannelExecutionScope.Current != null && !frameworkRun.Success)
+            throw new AgentChannelExecutionException(mayHaveWriteEffects,
+                failureFeedback + (calls.Count == 0 ? "\n本次未扣除对话额度。" : string.Empty), calls.Count > 0);
         var toolMap = tools.ToDictionary(x => x.ToolName, StringComparer.OrdinalIgnoreCase);
         var plan = calls
             .Select((call, index) =>
@@ -241,7 +249,7 @@ public class AgentService : IAgentService
         await ReportProgressAsync(progress, "generating_reply", "工具处理完成，正在组织回答", conversation.Id);
         var reply = frameworkRun.Success && !string.IsNullOrWhiteSpace(frameworkRun.Reply)
             ? frameworkRun.Reply.Trim()
-            : BuildFallbackReply(calls, frameworkRun.ErrorMessage);
+            : BuildFallbackReply(calls, failureFeedback);
         if (isProjectCsv && !calls.Any())
             reply = $"CSV 已完成分析，但 LLM 没有生成可确认的项目新增计划，因此没有写入任何数据。请检查表头和必填字段后重试。\n\n{reply}";
         await ReportProgressAsync(progress, "saving_result", "回答已生成，正在保存会话", conversation.Id);

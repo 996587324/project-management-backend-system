@@ -37,6 +37,7 @@ public sealed class ExternalToolClientEntity
     [SugarColumn(IsNullable = false, DefaultValue = "1")]
     public bool Enabled { get; set; } = true;
 
+    [SugarColumn(IsNullable = true)]
     public DateTime? ExpireTime { get; set; }
     public DateTime CreateTime { get; set; } = DateTime.Now;
     public DateTime UpdateTime { get; set; } = DateTime.Now;
@@ -46,6 +47,10 @@ public sealed class ExternalToolClientEntity
 [SugarTable("ExternalToolAccessLog")]
 public sealed class ExternalToolAccessLogEntity
 {
+    [SugarColumn(Length = 64, IsNullable = true)]
+    public string? UserId { get; set; }
+    [SugarColumn(Length = 32, IsNullable = true)]
+    public string? AppCode { get; set; }
     [SugarColumn(IsPrimaryKey = true, IsIdentity = true)]
     public long Id { get; set; }
 

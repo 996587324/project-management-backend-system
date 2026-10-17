@@ -26,6 +26,8 @@ public class EdgeDashboardSourceFieldOptionDto
     public string FieldName { get; set; } = string.Empty;
     public string ValueType { get; set; } = "String";
     public object? CurrentValue { get; set; }
+    /// <summary>共享模型映射后的展示值；CurrentValue 始终保留原始实际值。</summary>
+    public object? DisplayValue { get; set; }
     /// <summary>是否已匹配当前模型的共享展示映射。</summary>
     public bool HasModelDisplayMapping { get; set; }
     public string FormatType { get; set; } = "Direct";

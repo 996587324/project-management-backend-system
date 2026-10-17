@@ -48,4 +48,5 @@ public static class AgentCodes
     public const string ProjectManagement = "project-management";
     public const string EdgeGateway = "edge-gateway";
     public const string ProductionDashboard = "production-dashboard";
+    public const string ProcessBoard = "process-board";
 }

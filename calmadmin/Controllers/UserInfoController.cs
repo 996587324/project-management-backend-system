@@ -33,13 +33,32 @@ namespace calmadmin.Controllers
                 return Unauthorized(new { code = 401, msg = "登录状态已失效，请重新登录", data = "" });
             }
 
-            var user = await _userInfoService.GetUserInfoByUser(claimUserKey);
+            var access = await HttpContext.RequestServices.GetRequiredService<ISystemApplicationService>().GetAccessAsync(User, true);
+            var user = await _userInfoService.GetUserInfoByUser(access.UserId);
             if (user == null)
             {
                 return Unauthorized(new { code = 401, msg = "当前登录用户不存在或已停用", data = "" });
             }
 
-            var permissionKeys = await GetPermissionKeys(user);
+            var permissionKeys = access.Permissions.ToList();
+            if (access.PlatformAdministrator) permissionKeys.Add("ApplicationAdministration");
+            if (access.PlatformAdministrator || access.HasPermission("shared-dictionary.read"))
+                permissionKeys.AddRange(["SharedModelDictionary", "SystemBSharedModelDictionary"]);
+            if (access.AppCode == "B")
+            {
+                var menus = await HttpContext.RequestServices.GetRequiredService<ISystemApplicationMenuService>().GetTreeAsync(access);
+                void AddRouteNames(List<Model.Dto.FrontMenuDto> items)
+                {
+                    foreach (var item in items)
+                    {
+                        permissionKeys.Add(item.name);
+                        AddRouteNames(item.children);
+                    }
+                }
+                AddRouteNames(menus);
+            }
+            var application = (await HttpContext.RequestServices.GetRequiredService<ISystemApplicationService>()
+                .GetApplicationsAsync(User)).First(x => x.AppCode == access.AppCode);
             return Ok(new
             {
                 code = 200,
@@ -48,10 +67,17 @@ namespace calmadmin.Controllers
                 {
                     userId = user.UserId,
                     userName = user.UserName,
-                    roles = user.RoleList,
+                    roles = access.AppCode == "A" || (access.PlatformAdministrator && access.AllResources && access.HasPermission("*"))
+                        ? user.RoleList : new List<string>(),
+                    appCode = access.AppCode,
+                    systemName = application.DisplayName,
+                    homePath = application.HomePath,
+                    platformAdministrator = access.PlatformAdministrator,
                     buttons = permissionKeys.Where(x => x.Contains("_")).ToList(),
                     permissionKeys,
-                    email = user.Email
+                    email = user.Email,
+                    avatar = string.IsNullOrEmpty(user.AvatarFileKey) ? null : $"/api/user-profile/avatar?v={user.AvatarFileKey}",
+                    avatarVersion = user.AvatarFileKey
                 }
             });
         }

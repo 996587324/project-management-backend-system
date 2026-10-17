@@ -69,6 +69,9 @@ public sealed class ExternalToolCallerContext
     /// 仍保留该标记，以便执行记录明确标识此次调用来源。
     /// </summary>
     public bool IsDirectAccess { get; set; }
+    public bool AllResources { get; set; }
+    public string? UserId { get; set; }
+    public string? AppCode { get; set; }
     public string ClientId { get; set; } = string.Empty;
     public HashSet<string> Scopes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public HashSet<string> AllowedLineCodes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
