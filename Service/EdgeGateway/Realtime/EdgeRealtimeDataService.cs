@@ -21,6 +21,7 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
     private readonly IEdgeDashboardTelemetryProcessor _telemetryProcessor;
     private readonly IEdgeDashboardService _dashboardService;
     private readonly ILogger<EdgeRealtimeDataService> _logger;
+    private readonly IHourlyProductionIngress? _hourlyIngress;
     private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_dbScope, "calmadmin");
 
     /// <summary>通过 IOC 注入项目现有 SqlSugarScope、AutoMapper 和全局功能开关。</summary>
@@ -30,7 +31,8 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
         IEdgeGatewayFeatureService featureService,
         IEdgeDashboardTelemetryProcessor telemetryProcessor,
         IEdgeDashboardService dashboardService,
-        ILogger<EdgeRealtimeDataService> logger)
+        ILogger<EdgeRealtimeDataService> logger,
+        IHourlyProductionIngress? hourlyIngress = null)
     {
         _dbScope = dbScope;
         _mapper = mapper;
@@ -38,6 +40,7 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
         _telemetryProcessor = telemetryProcessor;
         _dashboardService = dashboardService;
         _logger = logger;
+        _hourlyIngress = hourlyIngress;
     }
 
     /// <summary>
@@ -70,6 +73,15 @@ public sealed class EdgeRealtimeDataService : IEdgeRealtimeDataService
         var snapshot = _mapper.Map<EdgeRealtimeDeviceSnapshotEntity>(writeModel);
         if (Encoding.UTF8.GetByteCount(snapshot.DataListJson) > MaxPayloadBytes)
             throw new InvalidOperationException("data JSON 不能超过 1 MB");
+        // 生产过站与最新快照是两种语义；先完成报文校验，再可靠保存旧时间补传。
+        if (_hourlyIngress != null)
+        {
+            var productionTime = normalized.SourceTimestamp.HasValue
+                ? TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTimeOffset.FromUnixTimeMilliseconds(normalized.SourceTimestamp.Value).UtcDateTime, "China Standard Time")
+                : HourlyProductionRules.Now;
+            await _hourlyIngress.CaptureRealtimeAsync(normalized.TenantMark ?? "", normalized.DeviceCode,
+                normalized.MessageId, productionTime, normalized.DataList.Select(x => JsonConvert.SerializeObject(x.Data)).ToArray(), cancellationToken);
+        }
 
         EdgeRealtimeReceiveResultDto result;
         EdgeDashboardTelemetrySampleDto telemetrySample;

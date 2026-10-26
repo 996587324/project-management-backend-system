@@ -22,7 +22,7 @@ namespace Service;
 /// 不调用 AgentDispatcher，也不公开原始报文或删除动作。
 /// 按调用者工具范围和业务资源授权执行；写操作必须确认并先记录审计。
 /// </summary>
-public sealed class ExternalToolService : IExternalToolService
+public sealed partial class ExternalToolService : IExternalToolService
 {
     private const int AccessTokenLifetimeMinutes = 30;
     private readonly SqlSugarScope _dbScope;
@@ -31,6 +31,9 @@ public sealed class ExternalToolService : IExternalToolService
     private readonly IProjectManageService _projectManageService;
     private readonly IUserActivityService _userActivityService;
     private readonly IWeChatClawBotService _weChatClawBotService;
+    private readonly IEmailPushService? _emailPushService;
+    private readonly IWeChatPushQueueService? _weChatPushQueue;
+    private readonly IHourlyProductionService? _hourlyProduction;
     private readonly IConfiguration _configuration;
     private readonly SemaphoreSlim _initializeLock = new(1, 1);
     private bool _initialized;
@@ -40,6 +43,9 @@ public sealed class ExternalToolService : IExternalToolService
     private static readonly IReadOnlyDictionary<string, ExternalToolDefinition> Definitions =
         new Dictionary<string, ExternalToolDefinition>(StringComparer.OrdinalIgnoreCase)
         {
+            ["hourly.boards"] = Definition("hourly.boards", "已发布小时产量看板", "列出已公开发布的小时产量看板名称与班次，不返回配置或数据源。", "dashboard.read", EmptySchema),
+            ["hourly.runtime"] = Definition("hourly.runtime", "小时产量与双线对比", "读取已发布看板当前班次两条线的工序小时产出、返工、目标、达成与单线汇总。", "dashboard.read", HourlyRuntimeSchema),
+            ["hourly.reports"] = Definition("hourly.reports", "小时统计报表", "分页读取已发布看板冻结的小时报表；读取不代表推送完成，可再调用微信或邮件推送工具。", "dashboard.read", HourlyReportSchema),
             ["production.line-runtime"] = Definition(
                 "production.line-runtime", "生产线实时状态", "读取指定线体的机械手、设备绑定展示字段和实时运行状态。",
                 "dashboard.read", LineSchema),
@@ -101,11 +107,29 @@ public sealed class ExternalToolService : IExternalToolService
                 "clawbot.delivery-status", "ClawBot 投递记录", "查询微信 ClawBot 的消息投递结果、失败原因和重试关联。",
                 "clawbot.read", ClawBotDeliverySchema),
             ["clawbot.send"] = Definition(
-                "clawbot.send", "发送 ClawBot 消息", "向一个或多个已授权、已绑定的后台用户发送文本消息；必须使用幂等键避免重复发送。",
+                "clawbot.send", "提交 ClawBot 消息队列", "确认后向已授权、已绑定的系统用户提交文本消息；返回队列任务编号，不代表已送达。使用幂等键避免重复。",
                 "clawbot.write", ClawBotSendSchema, true),
             ["clawbot.retry"] = Definition(
-                "clawbot.retry", "重试失败 ClawBot 消息", "仅重试单条失败投递；会产生新的投递记录并关联原记录。",
-                "clawbot.write", ClawBotRetrySchema, true)
+                "clawbot.retry", "重试失败 ClawBot 消息", "确认后按taskId或deliveryId重试当前MCP来源队列中明确失败的任务；Unknown及旧版未入队投递不可重试。",
+                "clawbot.write", ClawBotQueueRetrySchema, true),
+            ["clawbot.queue-status"] = Definition(
+                "clawbot.queue-status", "ClawBot 推送队列状态", "查询当前MCP来源的待发送及已处理任务；支持任务编号、接收人、幂等键和状态筛选。",
+                "clawbot.read", ClawBotQueueSchema),
+            ["email.recipients.list"] = Definition(
+                "email.recipients.list", "查询邮件接收用户", "按姓名、账号或邮箱搜索启用的系统用户及邮箱有效性。发送前先查询真实用户编码，不允许任意外部邮箱。",
+                "email.read", EmailRecipientsSchema),
+            ["email.channel-status"] = Definition(
+                "email.channel-status", "邮件推送服务状态", "只返回邮件队列是否就绪和服务是否启用，不返回SMTP配置、密码，不进行网络测试。",
+                "email.read", EmptySchema),
+            ["email.send"] = Definition(
+                "email.send", "提交邮件推送", "使用管理员统一发件邮箱提交邮件队列。按真实系统用户选择收件人、抄送，必须明确主题、正文、幂等键和confirm:true；入队不等于送达。",
+                "email.write", EmailSendSchema, true),
+            ["email.delivery-status"] = Definition(
+                "email.delivery-status", "邮件投递记录", "分页查询当前MCP来源的邮件投递结果和失败原因；可按任务或投递编号筛选，SMTP接受不代表已读。",
+                "email.read", EmailDeliverySchema),
+            ["email.retry"] = Definition(
+                "email.retry", "重试失败MCP邮件", "确认后按deliveryId重试当前MCP来源明确失败的邮件；不允许重试Unknown结果或后台用户邮件。",
+                "email.write", EmailRetrySchema, true)
         };
 
     public ExternalToolService(
@@ -115,7 +139,10 @@ public sealed class ExternalToolService : IExternalToolService
         IProjectManageService projectManageService,
         IUserActivityService userActivityService,
         IWeChatClawBotService weChatClawBotService,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IEmailPushService? emailPushService = null,
+        IWeChatPushQueueService? weChatPushQueue = null,
+        IHourlyProductionService? hourlyProduction = null)
     {
         _dbScope = dbScope;
         _dashboardService = dashboardService;
@@ -124,6 +151,9 @@ public sealed class ExternalToolService : IExternalToolService
         _userActivityService = userActivityService;
         _weChatClawBotService = weChatClawBotService;
         _configuration = configuration;
+        _emailPushService = emailPushService;
+        _weChatPushQueue = weChatPushQueue;
+        _hourlyProduction = hourlyProduction;
     }
 
     public async Task<ExternalToolClientSecretResultDto> SaveClientAsync(ExternalToolClientSaveDto dto)
@@ -246,7 +276,7 @@ public sealed class ExternalToolService : IExternalToolService
         Definitions.Values
             .Where(definition => caller.IsDirectAccess || caller.Scopes.Contains(definition.RequiredScope))
             .Where(definition => caller.IsDirectAccess || caller.AllResources ||
-                !definition.Name.StartsWith("user.") && !definition.Name.StartsWith("clawbot."))
+                !definition.Name.StartsWith("user.") && !definition.Name.StartsWith("clawbot.") && !definition.Name.StartsWith("email."))
             .Select(definition => ToAuthorizedDto(definition, caller))
             .ToList();
 
@@ -283,9 +313,14 @@ public sealed class ExternalToolService : IExternalToolService
                 throw new UnauthorizedAccessException("客户端未获此工具调用权限");
             if (definition.IsWrite)
                 EnsureWriteConfirmed(arguments);
+            if (definition.Name.StartsWith("clawbot.") || definition.Name.StartsWith("email."))
+            {
+                var errors = AgentJsonSchemaValidator.Validate(definition.InputSchema.GetRawText(), arguments.GetRawText());
+                if (errors.Count > 0) throw new ArgumentException(string.Join("；", errors.Take(8)));
+            }
 
             if (!caller.IsDirectAccess && !caller.AllResources &&
-                (definition.Name.StartsWith("user.") || definition.Name.StartsWith("clawbot.")))
+                (definition.Name.StartsWith("user.") || definition.Name.StartsWith("clawbot.") || definition.Name.StartsWith("email.")))
                 throw new UnauthorizedAccessException("该工具需要独立的用户或推送对象授权，不能沿用线体/项目资源权限");
             if (definition.IsWrite)
                 await WriteAuditAsync(caller, definition.Name, requestId, arguments, "Attempted", null, 0,
@@ -317,6 +352,10 @@ public sealed class ExternalToolService : IExternalToolService
         cancellationToken.ThrowIfCancellationRequested();
         switch (toolName)
         {
+            case "hourly.boards":
+            case "hourly.runtime":
+            case "hourly.reports":
+                return await ExecuteHourlyAsync(toolName, arguments, caller);
             case "production.line-runtime":
             {
                 var lineCode = GetOptionalString(arguments, "lineCode");
@@ -572,16 +611,35 @@ public sealed class ExternalToolService : IExternalToolService
                     GetBoundedInt(arguments, "size", 20, 1, 100),
                     cancellationToken);
             case "clawbot.send":
-                return await _weChatClawBotService.SendByMcpAsync(new WeChatClawBotMcpSendDto
+                return await RequireWeChatQueue().EnqueueByMcpAsync(caller, new WeChatPushEnqueueDto
                 {
-                    RecipientCodes = GetRequiredStringList(arguments, "recipientCodes"),
+                    RecipientUserIds = GetRequiredStringList(arguments, "recipientCodes"),
                     Content = GetRequiredString(arguments, "content"),
-                    Source = GetOptionalString(arguments, "source") ?? $"MCP:{caller.ClientId}",
+                    SourceLabel = GetOptionalString(arguments, "source"),
                     IdempotencyKey = GetRequiredString(arguments, "idempotencyKey"),
-                    ExternalTaskId = GetOptionalString(arguments, "externalTaskId")
-                }, cancellationToken);
+                    ExternalTaskId = GetOptionalString(arguments, "externalTaskId"),
+                    Confirm = GetOptionalBoolean(arguments, "confirm", false)
+                });
+            case "clawbot.queue-status":
+                return await RequireWeChatQueue().GetMcpRecordsAsync(caller, new WeChatPushQueueQuery
+                {
+                    TaskId = OptionalPositiveLong(arguments, "taskId"),
+                    RecipientCode = GetOptionalString(arguments, "recipientCode"),
+                    IdempotencyKey = GetOptionalString(arguments, "idempotencyKey"),
+                    Status = GetOptionalString(arguments, "status"),
+                    Current = GetBoundedInt(arguments, "current", 1, 1, 1000),
+                    Size = GetBoundedInt(arguments, "size", 20, 1, 100)
+                });
             case "clawbot.retry":
-                return await _weChatClawBotService.RetryDeliveryAsync(GetRequiredLong(arguments, "deliveryId"), true, cancellationToken);
+                await RequireWeChatQueue().RetryByMcpAsync(caller, OptionalPositiveLong(arguments, "taskId"),
+                    OptionalPositiveLong(arguments, "deliveryId"), GetOptionalBoolean(arguments, "confirm", false));
+                return new { queued = true, message = "微信任务已重新入队，请查询队列结果" };
+            case "email.recipients.list":
+            case "email.channel-status":
+            case "email.send":
+            case "email.delivery-status":
+            case "email.retry":
+                return await ExecuteEmailToolAsync(toolName, arguments, caller);
             default:
                 throw new InvalidOperationException("未找到允许公开的工具");
         }
@@ -812,8 +870,7 @@ public sealed class ExternalToolService : IExternalToolService
             : null;
 
     /// <summary>
-    /// 写工具必须同时有明确业务入参与 confirm=true；当前公开目录仅包含读取工具，
-    /// 此处作为后续新增写工具时的统一防误操作门禁。
+    /// 写工具必须同时有明确业务入参与 confirm=true，不以客户端或模型的自然语言承诺替代。
     /// </summary>
     private static void EnsureWriteConfirmed(JsonElement arguments)
     {

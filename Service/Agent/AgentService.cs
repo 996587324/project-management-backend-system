@@ -393,11 +393,10 @@ public class AgentService : IAgentService
         var result = await _emailService.SendAsync(request);
         if (request.ConversationId.HasValue)
         {
-            var ccText = result.CcEmails.Any() ? $"，抄送 {string.Join("、", result.CcEmails)}" : string.Empty;
             await AddMessageAsync(
                 request.ConversationId.Value,
                 "assistant",
-                $"邮件发送成功：收件人 {string.Join("、", result.ToEmails)}{ccText}。"
+                result.Message
             );
             await TouchConversationAsync(request.ConversationId.Value);
         }

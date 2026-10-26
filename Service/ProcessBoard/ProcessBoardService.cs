@@ -59,6 +59,7 @@ public sealed partial class ProcessBoardService(
                 definition.Kind == "Card" && !CanReadLine(access, definition.ParentId) ||
                 (definition.Kind == "Region" || definition.Kind == "Line" && old == null) && !access.AllResources)
                 throw new UnauthorizedAccessException("没有该工艺线体配置权限；创建区域或线体需要全部资源授权");
+            await ValidateDeviceScopeAsync(definition, old == null ? null : Read(old));
             var id = definition.Id;
             var kind = definition.Kind;
             var code = definition.Code;

@@ -32,6 +32,10 @@ public class AgentEmailDraftDto
 
 public class AgentEmailSendRequest
 {
+    public List<string> RecipientUserIds { get; set; } = new();
+    public List<string> CcUserIds { get; set; } = new();
+    public string IdempotencyKey { get; set; } = string.Empty;
+    public bool Confirm { get; set; }
     public int? ConversationId { get; set; }
     public int? SourceToolCallId { get; set; }
     public string? UserId { get; set; }
@@ -43,9 +47,11 @@ public class AgentEmailSendRequest
 
 public class AgentEmailSendResultDto
 {
+    public long TaskId { get; set; }
+    public string Status { get; set; } = "Pending";
     public bool Success { get; set; }
     public string Message { get; set; } = string.Empty;
     public List<string> ToEmails { get; set; } = new();
     public List<string> CcEmails { get; set; } = new();
-    public DateTime SendTime { get; set; }
+    public DateTime? SendTime { get; set; }
 }

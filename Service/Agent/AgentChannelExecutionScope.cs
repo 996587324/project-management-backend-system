@@ -13,21 +13,27 @@ public sealed class AgentChannelExecutionScope : IDisposable
     public bool AllowConfirmation { get; }
     public Func<AgentToolRegistryEntity, Task<string?>> AuthorizeToolAsync { get; }
     public Func<Task<ApplicationAccessContext>>? ResolveApplicationAccessAsync { get; }
+    public AgentChannelResultDraft? PreviousResult { get; }
 
     public AgentChannelExecutionScope(Func<AgentToolRegistryEntity, Task<string?>> authorizeToolAsync,
         CancellationToken cancellationToken, bool allowConfirmation = true,
-        Func<Task<ApplicationAccessContext>>? resolveApplicationAccessAsync = null)
+        Func<Task<ApplicationAccessContext>>? resolveApplicationAccessAsync = null,
+        AgentChannelResultDraft? previousResult = null)
     {
         _previous = Slot.Value;
         AuthorizeToolAsync = authorizeToolAsync;
         CancellationToken = cancellationToken;
         AllowConfirmation = allowConfirmation;
         ResolveApplicationAccessAsync = resolveApplicationAccessAsync;
+        PreviousResult = previousResult;
         Slot.Value = this;
     }
 
     public void Dispose() => Slot.Value = _previous;
 }
+
+/// <summary>仅由渠道在授权边界内构造，正文属于数据，不是模型指令。</summary>
+public sealed record AgentChannelResultDraft(string AgentCode, long SourceJobId, string Content, string AccessHash);
 
 public sealed class AgentChannelExecutionException(
     bool hasToolSideEffects,

@@ -77,9 +77,12 @@ public sealed class ProjectManagementAgentModuleProvider : IAgentModuleProvider
             Tool("task.status", "变更任务状态", "按任务 ID 修改任务状态。状态值：1未开始、2进行中、3已完成、4延期。",
                 "POST", "ChangeTaskStatus", TaskStatusSchema, objectOutput, true, true, "TaskBoard_Status", "Medium", 150,
                 "{\"tasks\":[{\"id\":12,\"status\":3}]}"),
-            Tool("email.send", "发送邮件", "将指定内容发送到收件人并可抄送。发送前必须由用户确认。",
+            Tool("email.recipients", "查询邮件接收用户", "按姓名、账号或邮箱搜索可选接收用户，返回真实用户编码及邮箱有效状态；发送邮件前使用。",
+                "GET", "GetEmailRecipients", EmailRecipientSchema, objectOutput, false, false, "AgentExecutor", "Low", 190,
+                "{\"keyword\":\"张三\",\"current\":1,\"size\":20}", "Email"),
+            Tool("email.send", "发送邮件", "使用管理员统一配置的邮箱将邮件提交后台队列。按系统用户编码选择收件人，可抄送；先查询用户，禁止编造用户编码。用户确认后入队，不代表实际送达。",
                 "POST", "SendEmail", EmailSchema, objectOutput, true, true, "AgentExecutor", "Medium", 200,
-                "{\"toEmails\":[\"user@example.com\"],\"ccEmails\":[],\"subject\":\"项目周报\",\"body\":\"正文\"}", "Email")
+                "{\"recipientUserIds\":[\"10002\"],\"ccUserIds\":[],\"subject\":\"项目周报\",\"body\":\"正文\"}", "Email")
         };
     }
 
@@ -152,6 +155,9 @@ public sealed class ProjectManagementAgentModuleProvider : IAgentModuleProvider
         {"type":"object","properties":{"tasks":{"type":"array","minItems":1,"items":{"type":"object","properties":{"id":{"type":"integer","minimum":1},"status":{"type":"integer","minimum":1,"maximum":4}},"required":["id","status"]}}},"required":["tasks"],"additionalProperties":false}
         """;
     private const string EmailSchema = """
-        {"type":"object","properties":{"toEmails":{"type":"array","minItems":1,"items":{"type":"string"}},"ccEmails":{"type":"array","items":{"type":"string"}},"subject":{"type":"string","minLength":1},"body":{"type":"string","minLength":1}},"required":["toEmails","subject","body"],"additionalProperties":false}
+        {"type":"object","properties":{"recipientUserIds":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"string"}},"ccUserIds":{"type":"array","items":{"type":"string"}},"subject":{"type":"string","minLength":1,"maxLength":160},"body":{"type":"string","minLength":1,"maxLength":100000}},"required":["recipientUserIds","subject","body"],"additionalProperties":false}
+        """;
+    private const string EmailRecipientSchema = """
+        {"type":"object","properties":{"keyword":{"type":"string","maxLength":128},"current":{"type":"integer","minimum":1},"size":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}
         """;
 }

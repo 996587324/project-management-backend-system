@@ -1,5 +1,21 @@
 namespace Model.SystemApplications;
 
+public sealed class SessionActivityRequest
+{
+    public int IdleMilliseconds { get; set; }
+}
+
+public sealed class SessionActivityResult
+{
+    public string SessionId { get; init; } = string.Empty;
+    // 使用 ISO UTC 字符串，避免全局日期格式丢失时区。
+    public string ServerTimeUtc { get; init; } = string.Empty;
+    public string ExpiresAtUtc { get; init; } = string.Empty;
+    public int IdleTimeoutSeconds { get; init; } = 20 * 60;
+    public string? Token { get; init; }
+    public string? PortalToken { get; init; }
+}
+
 public sealed class ApplicationGrantDto
 {
     public string UserId { get; set; } = string.Empty;

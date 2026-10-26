@@ -49,4 +49,6 @@ public static class AgentCodes
     public const string EdgeGateway = "edge-gateway";
     public const string ProductionDashboard = "production-dashboard";
     public const string ProcessBoard = "process-board";
+    public const string WeChatPush = "wechat-push";
+    public const string EmailPush = "email-push";
 }

@@ -11,8 +11,8 @@ using Service;
 namespace calmadmin.Controllers.ExternalTools;
 
 /// <summary>为不支持 MCP 的模型平台提供等价的 OpenAPI 工具目录和调用入口。</summary>
-/// <remarks>与标准 MCP V2 使用相同的专用令牌、工具授权和资源范围。</remarks>
-[Authorize(AuthenticationSchemes = ExternalToolAuthenticationDefaults.Scheme)]
+/// <remarks>内网免认证直连；仍保留已登记工具、业务参数校验、写入确认和审计。</remarks>
+[AllowAnonymous]
 [ApiController]
 [Route("api/external/v1")]
 public sealed class ExternalToolController : ControllerBase
@@ -25,9 +25,9 @@ public sealed class ExternalToolController : ControllerBase
     }
 
     [HttpGet("tools")]
-    public async Task<IActionResult> GetTools() => Ok(new JObject
+    public IActionResult GetTools() => Ok(new JObject
     {
-        ["data"] = ExternalToolJsonMapper.ToTools(_service.GetDefinitions(await ExternalToolCallerContextFactory.CreateAuthenticatedAsync(HttpContext)))
+        ["data"] = ExternalToolJsonMapper.ToTools(_service.GetDefinitions(ExternalToolCallerContextFactory.CreateDirect(HttpContext)))
     });
 
     [HttpPost("tools/{toolName}")]
@@ -36,7 +36,7 @@ public sealed class ExternalToolController : ControllerBase
         var result = await _service.ExecuteAsync(
             toolName,
             ToJsonElement(arguments),
-            await ExternalToolCallerContextFactory.CreateAuthenticatedAsync(HttpContext),
+            ExternalToolCallerContextFactory.CreateDirect(HttpContext),
             GetRequestId(),
             cancellationToken);
         return result.Success ? Ok(new { data = result.Data }) : BadRequest(new { message = result.Message });
@@ -48,9 +48,9 @@ public sealed class ExternalToolController : ControllerBase
         JsonDocument.Parse(token?.ToString(Formatting.None) ?? "{}").RootElement.Clone();
 }
 
-/// <summary>远程 MCP 的 Streamable HTTP 最小端点；只声明并执行白名单只读工具。</summary>
-/// <remarks>兼容旧协议入口，但不能绕过标准 MCP V2 的授权边界。</remarks>
-[Authorize(AuthenticationSchemes = ExternalToolAuthenticationDefaults.Scheme)]
+/// <summary>兼容旧版 MCP 协议入口；与标准 V2 一样使用内网免认证直连。</summary>
+/// <remarks>仅开放已登记的业务工具；写操作仍要求 confirm: true 并记录审计。</remarks>
+[AllowAnonymous]
 [ApiController]
 [Route("mcp")]
 public sealed class ExternalMcpController : ControllerBase
@@ -70,7 +70,7 @@ public sealed class ExternalMcpController : ControllerBase
         var id = request["id"]?.DeepClone();
         var method = request.Value<string>("method");
         var parameters = request["params"] as JObject ?? new JObject();
-        var caller = await ExternalToolCallerContextFactory.CreateAuthenticatedAsync(HttpContext);
+        var caller = ExternalToolCallerContextFactory.CreateDirect(HttpContext);
 
         if (string.Equals(method, "initialize", StringComparison.Ordinal))
             return await InitializeAsync(id);
@@ -184,12 +184,13 @@ internal static class ExternalToolCallerContextFactory
         };
     }
     /// <summary>
-    /// 仅供进程内受信任兼容调用使用；HTTP 入口不使用该方法。
+    /// 内网开放入口统一创建匿名直连来源，不伪造后台用户，也不按传入令牌提升或收窄权限。
     /// </summary>
     internal static ExternalToolCallerContext CreateDirect(HttpContext context) => new()
     {
         IsDirectAccess = true,
-        ClientId = "internal-mcp",
+        AllResources = true,
+        ClientId = "anonymous-mcp",
         RemoteIp = context.Connection.RemoteIpAddress?.ToString()
     };
 

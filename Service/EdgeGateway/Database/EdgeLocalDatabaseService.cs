@@ -2,6 +2,7 @@ using Interface;
 using Model.EdgeGateway;
 using SqlSugar;
 using System.Globalization;
+using Microsoft.Extensions.Logging;
 
 namespace Service;
 
@@ -13,7 +14,7 @@ public sealed class EdgeLocalDatabaseService : IEdgeLocalDatabaseService
 {
     private const string EdgeDatabaseConfigId = "edge-gateway";
     private const string LegacyMigrationKey = "edge_gateway_daily_database_v1";
-    private const int RetentionDays = 7;
+    private readonly ILogger<EdgeLocalDatabaseService>? _logger;
     private readonly ISqlSugarClient _legacyDb;
     private readonly EdgeGatewayBootstrapOptions _bootstrapOptions;
     private readonly SemaphoreSlim _accessGate = new(1, 1);
@@ -23,11 +24,13 @@ public sealed class EdgeLocalDatabaseService : IEdgeLocalDatabaseService
 
     public EdgeLocalDatabaseService(
         SqlSugarScope dbScope,
-        EdgeGatewayBootstrapOptions bootstrapOptions)
+        EdgeGatewayBootstrapOptions bootstrapOptions,
+        ILogger<EdgeLocalDatabaseService>? logger = null)
     {
         // 旧 edge-gateway.db 仅用于首次迁移今天和昨天尚未上传的消息。
         _legacyDb = dbScope.GetConnectionScope(EdgeDatabaseConfigId);
         _bootstrapOptions = bootstrapOptions;
+        _logger = logger;
     }
 
     /// <summary>初始化当天数据库、迁移旧单文件待传数据，并执行一次过期文件清理。</summary>
@@ -40,7 +43,7 @@ public sealed class EdgeLocalDatabaseService : IEdgeLocalDatabaseService
             var now = DateTime.UtcNow;
             _ = GetDailyDatabase(now);
             await MigrateLegacyPendingMessagesAsync(now, cancellationToken);
-            await CleanupExpiredCompletedDatabaseFilesIfDueAsync(now, cancellationToken);
+            await CleanupExpiredDatabaseFilesIfDueAsync(now, cancellationToken);
             _initialized = true;
         }
         finally
@@ -200,7 +203,7 @@ public sealed class EdgeLocalDatabaseService : IEdgeLocalDatabaseService
         int limit,
         CancellationToken cancellationToken)
     {
-        await CleanupExpiredCompletedDatabaseFilesIfDueAsync(now, cancellationToken);
+        await CleanupExpiredDatabaseFilesIfDueAsync(now, cancellationToken);
         var records = new List<EdgeLocalMessageQueueEntity>();
         foreach (var day in await GetReadableDaysAsync(now, cancellationToken))
         {
@@ -271,24 +274,28 @@ public sealed class EdgeLocalDatabaseService : IEdgeLocalDatabaseService
         return true;
     }
 
-    /// <summary>每天一次，只删除超过七天且已完成上传的整份 SQLite 日文件。</summary>
-    private async Task CleanupExpiredCompletedDatabaseFilesIfDueAsync(
+    /// <summary>每天检查一次：超过四个工作日的整份日库直接删除，不检查上传状态。</summary>
+    private Task CleanupExpiredDatabaseFilesIfDueAsync(
         DateTime now,
         CancellationToken cancellationToken)
     {
         var today = now.Date;
-        if (_lastCleanupDate == today) return;
+        if (_lastCleanupDate == today) return Task.CompletedTask;
 
-        var oldestRetainedDate = today.AddDays(-(RetentionDays - 1));
+        var oldestRetainedDate = EdgeLocalRetentionPolicy.GetOldestRetainedDate(today);
         foreach (var day in GetDailyDatabaseDays())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (day.Date >= oldestRetainedDate || !await MarkDayCompletedIfReadyAsync(day, cancellationToken))
+            if (day.Date >= oldestRetainedDate)
                 continue;
             CloseDailyDatabase(day);
             DeleteDailyDatabaseFile(day);
+            _logger?.LogWarning(
+                "Deleted local EdgeGateway daily database {FileName}: older than {RetentionWorkdays} workdays (UTC). Upload status was not checked; pending data is permanently removed.",
+                Path.GetFileName(GetDailyDatabasePath(day)), EdgeLocalRetentionPolicy.RetentionWorkdays);
         }
         _lastCleanupDate = today;
+        return Task.CompletedTask;
     }
 
     /// <summary>首次升级时将旧单文件中今天、昨天未上传的数据复制到对应日文件。</summary>

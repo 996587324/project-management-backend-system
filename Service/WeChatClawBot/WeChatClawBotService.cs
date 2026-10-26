@@ -355,6 +355,26 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         }
     }
 
+    public async Task<WeChatClawBotDeliveryDto> SendQueuedMessageAsync(string userId, string content,
+        string idempotencyKey, string taskId, string bindingIdentity, CancellationToken cancellationToken, string source = "AgentPush")
+    {
+        if (source is not ("AgentPush" or "MCP")) throw new ArgumentException("不支持的队列来源");
+        await SystemSendGate.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureInitializedAsync(cancellationToken);
+            var existing = await Db.Queryable<WeChatClawBotDeliveryEntity>().FirstAsync(x =>
+                x.UserId == userId && x.Source == source && x.IdempotencyKey == idempotencyKey);
+            if (existing != null) return ToDeliveryDto(existing);
+            return await SendOneAsync(userId, content, source, idempotencyKey, taskId, cancellationToken,
+                true, classifyUncertainResult: true, expectedBindingIdentity: bindingIdentity);
+        }
+        finally
+        {
+            SystemSendGate.Release();
+        }
+    }
+
     public async Task<PagedResultDto<WeChatClawBotInboundMessageDto>> GetMyInboundMessagesAsync(
         string userId,
         int current,

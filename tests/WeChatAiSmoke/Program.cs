@@ -20,7 +20,8 @@ using 上传MES.Config;
 if (args.Length != 1) throw new ArgumentException("请提供后端根目录；测试仅创建随机隔离数据库，不发送真实微信或模型请求");
 await ReplyFeedbackSmoke.RunAsync();
 using var configuration = JsonDocument.Parse(File.ReadAllText(Path.Combine(Path.GetFullPath(args[0]), "calmadmin", "appsettings.json")));
-var configured = configuration.RootElement.GetProperty("ConnectionStrings").GetProperty("calmadmin").GetString()!;
+var configured = Environment.GetEnvironmentVariable("WECHAT_AI_SMOKE_SQL") ??
+    configuration.RootElement.GetProperty("ConnectionStrings").GetProperty("calmadmin").GetString()!;
 var database = "CodexWeChatAi_" + Guid.NewGuid().ToString("N");
 using var master = new SqlConnection(new SqlConnectionStringBuilder(configured) { InitialCatalog = "master" }.ConnectionString);
 await master.OpenAsync();

@@ -13,6 +13,7 @@ public interface ISystemApplicationService
     Task<object> CreateTicketAsync(ClaimsPrincipal principal, ApplicationTicketRequest request);
     Task<object> RedeemTicketAsync(ApplicationTicketRedeemRequest request);
     Task RevokeSessionAsync(ClaimsPrincipal principal);
+    Task<SessionActivityResult> GetSessionActivityAsync(ClaimsPrincipal principal, int? idleMilliseconds = null);
     Task SaveApplicationAsync(ClaimsPrincipal principal, SysApplicationEntity application);
     Task<List<ApplicationGrantDto>> GetGrantsAsync(ClaimsPrincipal principal, string userId);
     Task SaveGrantAsync(ClaimsPrincipal principal, ApplicationGrantDto grant);

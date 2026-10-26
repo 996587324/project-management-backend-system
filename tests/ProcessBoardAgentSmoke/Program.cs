@@ -152,6 +152,12 @@ try
     var cardResult = await Write("create", new { kind = "Card", parentId = lineId, code = "CA", name = "Agent参数卡片" });
     var cardId = cardResult.GetProperty("id").GetInt64();
     async Task<ProcessBoardDefinition> Definition(long id) => (await board.GetDefinitionsAsync(admin)).Single(item => item.Id == id);
+    var outsideLine = await Plan("field-upsert", new { id = cardId, version = 1, patch = new {
+        code = "outside-line", name = "尚未关联设备", source = new { tenantMark = "tenant", deviceMark = "device", sourcePath = "/temperature" } } });
+    var outsideResult = await dispatcher.ConfirmAsync(new AgentConfirmRequest { UserId = admin.UserId, ToolCallId = outsideLine.Id });
+    Check(outsideResult?.Status == "Failed" && (await Definition(cardId)).Fields.Count == 0,
+        "confirmed Agent writes cannot bind a card to a device outside its line");
+    await Write("devices-bind", new { id = lineId, version = 1, patch = new { devices = new[] { new { tenantMark = "tenant", deviceMark = "device" } } } });
     var fields = await Write("field-upsert", new
     {
         id = cardId, version = 1, patch = new
@@ -168,7 +174,6 @@ try
           savedCard.Fields[0].LowerLimit == null && savedCard.Fields[0].UpperLimit == 80 && savedCard.Fields[0].PushEnabled,
         "partial field edits preserve source/formula/push and explicitly clear a nullable limit without duplicates");
     await Write("layout-update", new { id = cardId, version = savedCard.Version, patch = new { fieldColumns = 2, width = 600 } });
-    await Write("devices-bind", new { id = lineId, version = 1, patch = new { devices = new[] { new { tenantMark = "tenant", deviceMark = "device" } } } });
     await Write("flows-upsert", new
     {
         id = lineId, version = 2, patch = new { nodes = new[] { new { id = "n1", name = "上料", x = 10, y = 20, cardId } } }

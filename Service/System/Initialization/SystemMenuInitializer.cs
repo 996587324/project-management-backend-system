@@ -161,16 +161,7 @@ internal sealed class SystemMenuInitializer
             "外部 MCP 客户端",
             6,
             "R_SUPER,R_ADMIN");
-        await EnsureAgentChildMenuAsync(
-            db,
-            rootMenu.MenuId,
-            "WeChatClawBotManagement",
-            "clawbot-management",
-            "/agent/clawbot-management",
-            "微信 ClawBot 管理",
-            7,
-            "R_SUPER,R_ADMIN",
-            icon: "ri:wechat-line");
+        // 微信管理入口由 PushCenterMenus 统一整理，不能在重启后重新补到 Agent 中心。
     }
 
     /// <summary>

@@ -41,6 +41,16 @@ public sealed class SystemApplicationsController(ISystemApplicationService appli
     [HttpGet("context")]
     public async Task<IActionResult> Context() => Success(await applications.GetAccessAsync(User));
 
+    [HttpGet("session")]
+    [Authorize(AuthenticationSchemes = "SessionStatus")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+    public async Task<IActionResult> Session() => Success(await applications.GetSessionActivityAsync(User));
+
+    [HttpPost("activity")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+    public async Task<IActionResult> Activity([FromBody] SessionActivityRequest request) =>
+        Success(await applications.GetSessionActivityAsync(User, request.IdleMilliseconds));
+
     [HttpPost("ticket")]
     public async Task<IActionResult> Ticket([FromBody] ApplicationTicketRequest request) =>
         Success(await applications.CreateTicketAsync(User, request));

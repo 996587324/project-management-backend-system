@@ -179,6 +179,10 @@ namespace 上传MES.Config
             builder.Services.AddHostedService<ProcessBoardHostedService>();
             builder.Services.AddHostedService<ProcessBoardExportHostedService>();
             builder.Services.AddMemoryCache();
+            builder.Services.AddSingleton<HourlyProductionCatalog>();
+            builder.Services.AddSingleton<IHourlyProductionInitializer, HourlyProductionInitializer>();
+            builder.Services.AddHostedService<HourlyProductionHostedService>();
+            builder.Services.AddHostedService<HourlyProductionAiHostedService>();
             // 模型平台密钥通过 Data Protection 加密后保存到数据库，不允许配置管理接口返回明文。
             builder.Services.AddDataProtection().SetApplicationName("CalmAdmin.AgentModelProvider");
             builder.Services.AddSingleton<IAgentModelDatabaseInitializer, AgentModelDatabaseInitializer>();
@@ -268,10 +272,38 @@ namespace 上传MES.Config
                      }
                  };
              })
+             .AddJwtBearer("SessionStatus", options =>
+             {
+                 // 仅供只读会话查询恢复挂起页面的旧令牌；有效性仍由数据库会话决定。
+                 options.TokenValidationParameters = new TokenValidationParameters
+                 {
+                     ValidateIssuer = true, ValidIssuer = tokenOptions.Issuer,
+                     ValidateAudience = true, ValidAudience = tokenOptions.Audience,
+                     ValidateIssuerSigningKey = true,
+                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tokenOptions.SecurityKey)),
+                     RequireExpirationTime = true, ValidateLifetime = false
+                 };
+                 options.Events = new JwtBearerEvents
+                 {
+                     OnTokenValidated = async context =>
+                     {
+                         try
+                         {
+                             var purpose = context.Principal?.FindFirst("TokenPurpose")?.Value;
+                             if (purpose is not ("portal" or "app") || context.SecurityToken.ValidTo == DateTime.MinValue)
+                                 throw new UnauthorizedAccessException("请使用统一入口重新登录");
+                             context.HttpContext.Items[typeof(Model.SystemApplications.ApplicationAccessContext)] =
+                                 await context.HttpContext.RequestServices.GetRequiredService<ISystemApplicationService>()
+                                     .GetAccessAsync(context.Principal!, purpose == "app");
+                         }
+                         catch (UnauthorizedAccessException exception) { context.Fail(exception.Message); }
+                     }
+                 };
+             })
              .AddJwtBearer(ExternalToolAuthenticationDefaults.Scheme, options =>
              {
-                 // 外部 MCP/OpenAPI 仅接受服务端签发且 audience 专属的短期机器令牌，
-                 // 明确拒绝后台用户登录 JWT，避免把后台会话凭据作为对外接口凭据使用。
+                 // 保留专用 audience 的令牌校验方案以兼容已有集成；当前开放 MCP/OpenAPI
+                 // 入口显式 AllowAnonymous，不再强制使用此方案。后台其他接口仍按原 JWT 规则鉴权。
                  options.TokenValidationParameters = new TokenValidationParameters
                  {
                      ValidateIssuer = true,
@@ -396,10 +428,17 @@ namespace 上传MES.Config
             builder.Services.AddScoped<IBusinessBillRepository, BusinessBillRepository>();
             builder.Services.AddScoped<IBusinessBillService, BusinessBillService>();
             builder.Services.AddScoped<IProjectManageService, ProjectManageService>();
-            builder.Services.Configure<EmailOptions>(builder.Configuration.GetSection("EmailOptions"));
             builder.Services.AddScoped<IEmailService, EmailService>();
+            builder.Services.AddSingleton<IEmailPushDatabaseInitializer, EmailPushDatabaseInitializer>();
+            builder.Services.AddSingleton<IEmailSecretProtector, EmailSecretProtector>();
+            builder.Services.AddScoped<IEmailPushService, EmailPushService>();
+            builder.Services.AddScoped<IEmailTransport, MailKitEmailTransport>();
+            builder.Services.AddHostedService<EmailPushHostedService>();
             builder.Services.AddScoped<IWeChatClawBotService, WeChatClawBotService>();
             builder.Services.AddScoped<IWeChatClawBotAiService, WeChatClawBotAiService>();
+            builder.Services.AddSingleton<IWeChatPushQueueInitializer, WeChatPushQueueInitializer>();
+            builder.Services.AddScoped<IWeChatPushQueueService, WeChatPushQueueService>();
+            builder.Services.AddHostedService<WeChatPushQueueHostedService>();
             builder.Services.AddScoped<IEdgeDeviceCardPushService, EdgeDeviceCardPushService>();
             builder.Services.AddScoped<IEdgeModelFieldCatalogService, EdgeModelFieldCatalogService>();
             var weChatClawBotOptions = builder.Configuration.GetSection("WeChatClawBot").Get<WeChatClawBotOptions>() ?? new WeChatClawBotOptions();

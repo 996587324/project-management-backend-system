@@ -65,9 +65,9 @@ public sealed class SystemApplicationAccessFilter(ISystemApplicationService appl
 
     private static bool IsInfrastructure(ControllerActionDescriptor action, ActionExecutingContext context)
     {
-        // 外部工具控制器有独立认证方案，不能再走后台系统令牌校验。
+        // MCP/OpenAPI 数据入口使用内网匿名直连；兼容换取令牌接口也自行处理凭据，均不走后台 A/B 会话校验。
         if (action.ControllerName is "ExternalTool" or "ExternalMcp" or "ExternalToolToken") return true;
-        if (action.ControllerName is "auth" or "OAuth2" or "PdaAuth" or "EdgeDashboardPublic") return true;
+        if (action.ControllerName is "auth" or "OAuth2" or "PdaAuth" or "EdgeDashboardPublic" or "HourlyProductionPublic") return true;
         if (action.ControllerName == "Pda" &&
             context.HttpContext.User.FindFirst("LoginSource")?.Value == "PDA") return true;
         if (action.ControllerName == "SystemApplications" && action.ActionName is "Redeem" or "EntryInformation") return true;
@@ -78,7 +78,7 @@ public sealed class SystemApplicationAccessFilter(ISystemApplicationService appl
 
     private static bool IsScopedEndpoint(ControllerActionDescriptor action) =>
         action.ControllerName == "UserProfile" && action.ActionName is "GetAvatarInfo" or "GetAvatar" or "UploadAvatar" or "ResetAvatar" ||
-        action.ControllerName is "SystemApplications" or "SharedData" or "ProcessBoard" or "WeChatClawBotAi" or "WeChatClawBot" ||
+        action.ControllerName is "SystemApplications" or "SharedData" or "SourceCatalog" or "ProcessBoard" or "WeChatClawBotAi" or "WeChatClawBot" or "EmailPush" or "WeChatPushQueue" or "HourlyProduction" ||
         action.ControllerName == "UserInfo" && action.ActionName == "GetUserInfo" ||
         action.ControllerName == "Menu" && action.ActionName == "GetMenuTree" ||
         action.ControllerName == "UserActivity" && action.ActionName is "Heartbeat" or "Logout" or "RecordOperation";

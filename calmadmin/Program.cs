@@ -40,7 +40,7 @@ builder.Services
     .AddMcpServer(options =>
     {
         options.ServerInfo = mcpV2ServerInfoProvider.ServerInfo;
-        options.ServerInstructions = "按调用者的系统授权提供数据工具。写操作必须显式传入 confirm: true。";
+        options.ServerInstructions = "内网免认证直连，提供已登记的业务工具；写操作必须提供明确业务参数并显式传入 confirm: true。";
     })
     .WithHttpTransport(options => options.Stateless = true)
     .WithListToolsHandler(ExternalMcpV2Handlers.ListToolsAsync)
@@ -110,7 +110,7 @@ app.Use(async (context, next) =>
 });
 #endregion
 app.MapControllers();
-app.MapMcp("/mcp/v2").RequireAuthorization("McpAccess");
+app.MapMcp("/mcp/v2").AllowAnonymous();
 app.MapGet("/ws/agent", async (HttpContext context, AgentWebSocketHandler handler) =>
 {
     await handler.HandleAsync(context);

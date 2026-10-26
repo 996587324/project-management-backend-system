@@ -83,6 +83,8 @@ public sealed class WeChatClawBotAiJobEntity
     public string? AgentCode { get; set; }
     public bool QuotaReserved { get; set; }
     public bool RequiresConfirmation { get; set; }
+    [SugarColumn(Length = 64, IsNullable = true)]
+    public string? ResultAccessHash { get; set; }
     [SugarColumn(ColumnDataType = "nvarchar(max)", IsNullable = true)]
     public string? Reply { get; set; }
     [SugarColumn(Length = 1000, IsNullable = true)]

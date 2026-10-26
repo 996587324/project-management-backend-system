@@ -34,7 +34,7 @@ internal static class ExternalMcpV2Handlers
                 {
                     ReadOnlyHint = !definition.RequiredScope.EndsWith(".write", StringComparison.OrdinalIgnoreCase),
                     IdempotentHint = !definition.RequiredScope.EndsWith(".write", StringComparison.OrdinalIgnoreCase),
-                    OpenWorldHint = false
+                    OpenWorldHint = definition.RequiredScope is "clawbot.write" or "email.write"
                 }
             })
             .ToList();
@@ -75,7 +75,7 @@ internal static class ExternalMcpV2Handlers
         var httpContext = services.GetService<IHttpContextAccessor>()?.HttpContext;
         return httpContext == null
             ? throw new UnauthorizedAccessException("MCP HTTP 调用上下文不可用")
-            : ExternalToolCallerContextFactory.CreateAuthenticatedAsync(httpContext);
+            : Task.FromResult(ExternalToolCallerContextFactory.CreateDirect(httpContext));
     }
 
     private static JsonElement ToJsonElement(IDictionary<string, JsonElement>? arguments) =>

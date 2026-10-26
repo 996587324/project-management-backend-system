@@ -101,6 +101,7 @@ try
     var db = scope.GetConnectionScope("calmadmin");
     await ProcessBoardSchema.InitializeAsync(db);
     await ProcessBoardSchema.InitializeAsync(db);
+    db.CodeFirst.InitTables<EdgeDashboardModelFieldCatalogEntity>();
     Check(await db.Queryable<ProcessBoardSettingEntity>().CountAsync() == 1, "fresh and repeat schema initialization");
     db.DbMaintenance.DropColumn("ProcessBoardSetting", "FormulaUseType");
     db.DbMaintenance.DropColumn("ProcessBoardSetting", "FormulaSignature");
@@ -147,7 +148,8 @@ try
     };
     var service = new ProcessBoardService(scope, new TestFormula(), new TestPush());
     var region = await service.SaveAsync(admin, new ProcessBoardDefinition { Code = "R1", Name = "测试区域" });
-    var line = await service.SaveAsync(admin, new ProcessBoardDefinition { Kind = "Line", ParentId = region.Id, Code = "L1", Name = "测试线体" });
+    var line = await service.SaveAsync(admin, new ProcessBoardDefinition { Kind = "Line", ParentId = region.Id, Code = "L1", Name = "测试线体",
+        Devices = [new() { TenantMark = "tenant", DeviceMark = "device" }] });
     var card = await service.SaveAsync(admin, new ProcessBoardDefinition
     {
         Kind = "Card", ParentId = line.Id, Code = "C1", Name = "工艺参数",
@@ -252,6 +254,7 @@ try
     card.Fields[0].PushEnabled = false;
     card = await service.SaveAsync(admin, card);
     Check(!await ProcessBoardPushBridge.IsCurrentAsync(db, queued!), "queued message is cancelled after configuration changes");
+    await DeviceScopeSmoke.RunAsync(scope, service, admin, region.Id);
     Console.WriteLine("Process board SQL smoke complete.");
 }
 finally

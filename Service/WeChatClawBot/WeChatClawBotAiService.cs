@@ -351,6 +351,8 @@ public sealed class WeChatClawBotAiService(
                     throw new WeChatClawBotAgentClarificationException("请明确要使用的 Agent，或将跨业务问题分步提出。可发送 @Agent编码 问题：\n" +
                         string.Join("\n", candidates.Select(x => $"@{x.AgentCode}（{x.Name}）")));
                 job.AgentCode = selectedAgent;
+                var resultAccessHash = PushResultAccessFingerprint.Create(
+                    await applications.GetChannelAccessAsync(userId, config.AppCode));
                 var conversations = WeChatClawBotAiAgentRouting.GetConversations(config);
                 var allowConfirmation = confirmation && previous?.Status == "Sent" && previous.RequiresConfirmation &&
                     previous.UpdateTimeUtc > DateTime.UtcNow.AddMinutes(-10) &&
@@ -363,6 +365,9 @@ public sealed class WeChatClawBotAiService(
                         .Where(x => conversationIds.Contains(x.ConversationId) && x.UserId == userId && x.Status == "PendingConfirmation")
                         .ExecuteCommandAsync();
                 }
+                var previousResult = PushAgentCatalog.IsPushAgent(selectedAgent)
+                    ? await GetPreviousResultAsync(config, job.Id)
+                    : null;
                 using var channel = new AgentChannelExecutionScope(async tool =>
                 {
                     var current = await RequireCurrentAsync(job, true);
@@ -370,7 +375,7 @@ public sealed class WeChatClawBotAiService(
                     if (!WeChatClawBotAiAgentRouting.GetAllowed(current).Contains(selectedAgent, StringComparer.OrdinalIgnoreCase) ||
                         !CanUseAgent(access, selectedAgent)) return "没有当前系统 Agent 权限";
                     // 旧工具尚未实现资源级过滤；不能仅凭参数限定就返回全量数据。
-                    if (!access.AllResources && tool.ServiceName != "ProcessBoard")
+                    if (!access.AllResources && tool.ServiceName is not ("ProcessBoard" or "WeChatPush" or "EmailPush"))
                         return "该业务工具尚未适配受限数据范围，已拒绝执行";
                     if (!string.IsNullOrWhiteSpace(tool.PermissionKey) && !access.HasPermission(tool.PermissionKey))
                         return "缺少当前系统工具权限：" + tool.PermissionKey;
@@ -383,7 +388,7 @@ public sealed class WeChatClawBotAiService(
                 {
                     var current = await RequireCurrentAsync(job, true);
                     return await applications.GetChannelAccessAsync(userId, current.AppCode);
-                });
+                }, previousResult);
                 if (!conversations.TryGetValue(selectedAgent, out var conversationId))
                 {
                     var conversation = await agent.CreateConversationAsync(new AgentStartRequest
@@ -417,6 +422,9 @@ public sealed class WeChatClawBotAiService(
                 await RequireCurrentAsync(job, true);
                 job.Reply = string.IsNullOrWhiteSpace(response.Reply) ? "本次未生成有效回复，请稍后重试。" : response.Reply;
                 job.RequiresConfirmation = response.RequiresConfirmation;
+                var latestAccessHash = PushResultAccessFingerprint.Create(
+                    await applications.GetChannelAccessAsync(userId, config.AppCode));
+                job.ResultAccessHash = resultAccessHash == latestAccessHash ? resultAccessHash : null;
                 if (response.RequiresConfirmation)
                     job.Reply += "\n请在十分钟内回复“确认”执行以上操作。";
                 if (job.Reply.Length > 10000) job.Reply = job.Reply[..9900] + "\n内容过长，完整结果请在后台 Agent 会话查看。";
@@ -631,8 +639,10 @@ public sealed class WeChatClawBotAiService(
     private static bool CanUseChannel(ApplicationAccessContext access) =>
         access.HasPermission("WeChatClawBot") || access.HasPermission("WeChatClawBotManagement");
 
-    private static bool CanUseAgent(ApplicationAccessContext access, string agentCode)
+    internal static bool CanUseAgent(ApplicationAccessContext access, string agentCode)
     {
+        if (agentCode == AgentCodes.WeChatPush) return access.HasPermission("WeChatClawBot");
+        if (agentCode == AgentCodes.EmailPush) return access.HasPermission("EmailPush");
         if (access.HasPermission("Agent") || access.HasPermission("AgentExecutor")) return true;
         return agentCode switch
         {
@@ -642,6 +652,24 @@ public sealed class WeChatClawBotAiService(
             AgentCodes.ProcessBoard => access.HasPermission("ProcessBoardAgent"),
             _ => false
         };
+    }
+
+    private async Task<AgentChannelResultDraft?> GetPreviousResultAsync(WeChatClawBotAiConnectionEntity config, long currentJobId)
+    {
+        var earliest = DateTime.UtcNow.AddMinutes(-30);
+        var row = await Db.Queryable<WeChatClawBotAiJobEntity>()
+            .Where(x => x.UserId == config.UserId && x.Version == config.Version && x.Id < currentJobId &&
+                x.Kind == "Agent" && x.Status == "Sent" && !x.RequiresConfirmation && x.UpdateTimeUtc >= earliest &&
+                x.AgentCode != AgentCodes.Chat && x.AgentCode != AgentCodes.WeChatPush && x.AgentCode != AgentCodes.EmailPush)
+            .OrderByDescending(x => x.Id).FirstAsync();
+        if (row?.AgentCode == null || string.IsNullOrWhiteSpace(row.Reply)) return null;
+        var access = await applications.GetChannelAccessAsync(config.UserId, config.AppCode);
+        if (!CanUseAgent(access, row.AgentCode)) return null;
+        if (!WeChatClawBotAiAgentRouting.GetAllowed(config).Contains(row.AgentCode, StringComparer.OrdinalIgnoreCase)) return null;
+        if (!access.AllResources && row.AgentCode != AgentCodes.ProcessBoard) return null;
+        var accessHash = PushResultAccessFingerprint.Create(access);
+        if (row.ResultAccessHash != accessHash) return null;
+        return new AgentChannelResultDraft(row.AgentCode, row.Id, row.Reply, accessHash);
     }
 
     private static void Revoke(WeChatClawBotAiConnectionEntity config)

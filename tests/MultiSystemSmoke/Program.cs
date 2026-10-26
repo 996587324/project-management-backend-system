@@ -260,6 +260,24 @@ try
             try { await service.GetAccessAsync(context.Principal!); }
             catch (UnauthorizedAccessException exception) { Console.WriteLine("Session validation failed: " + exception.Message); context.Fail(exception.Message); }
         } };
+    }).AddJwtBearer("SessionStatus", options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true, ValidIssuer = jwt.Issuer, ValidateAudience = true, ValidAudience = jwt.Audience,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SecurityKey)),
+            RequireExpirationTime = true, ValidateLifetime = false
+        };
+        options.Events = new JwtBearerEvents { OnTokenValidated = async context =>
+        {
+            try
+            {
+                if (context.Principal?.FindFirst("TokenPurpose")?.Value is not ("portal" or "app") ||
+                    context.SecurityToken.ValidTo == DateTime.MinValue) throw new UnauthorizedAccessException();
+                await service.GetAccessAsync(context.Principal!);
+            }
+            catch (UnauthorizedAccessException exception) { context.Fail(exception.Message); }
+        } };
     }).AddJwtBearer(ExternalToolAuthenticationDefaults.Scheme, options =>
     {
         options.TokenValidationParameters = new TokenValidationParameters
@@ -279,10 +297,28 @@ try
     app.UseAuthentication();
     app.UseAuthorization();
     app.MapControllers();
-    app.MapMcp("/mcp/v2").RequireAuthorization("McpAccess");
+    app.MapMcp("/mcp/v2").AllowAnonymous();
     await app.StartAsync();
     using var client = new HttpClient { BaseAddress = new Uri(app.Urls.Single()) };
     client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", bToken);
+    using var suspendedClient = new HttpClient { BaseAddress = client.BaseAddress };
+    var expiredBrowserToken = new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(jwt.Issuer, jwt.Audience,
+        new JwtSecurityTokenHandler().ReadJwtToken(bToken).Claims.Where(x => x.Type is not ("exp" or "iss" or "aud")),
+        expires: DateTime.UtcNow.AddMinutes(-10),
+        signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SecurityKey)), SecurityAlgorithms.HmacSha256)));
+    suspendedClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", expiredBrowserToken);
+    Require((await suspendedClient.GetAsync("/api/system-applications/session")).IsSuccessStatusCode,
+        "suspended A/B page may recover an expired signed token only while shared server session is still valid");
+    Require((await suspendedClient.GetAsync("/api/Menu/GetMenuTree")).StatusCode == HttpStatusCode.Unauthorized &&
+        (await suspendedClient.PostAsync("/api/system-applications/activity", JsonBody("{\"idleMilliseconds\":0}"))).StatusCode == HttpStatusCode.Unauthorized,
+        "expired token alone cannot call business APIs or renew idle time");
+    var sessionResponse = await client.GetAsync("/api/system-applications/session");
+    Require(sessionResponse.IsSuccessStatusCode && (await sessionResponse.Content.ReadAsStringAsync()).Contains("1200"),
+        "authenticated B user can read idle session state without extra administration permission");
+    Require((await client.PostAsync("/api/system-applications/activity", JsonBody("{\"idleMilliseconds\":0}"))).IsSuccessStatusCode,
+        "real activity HTTP endpoint accepts authenticated B session");
+    Require((await client.PostAsync("/api/system-applications/activity", JsonBody("{\"idleMilliseconds\":1200000}"))).StatusCode == HttpStatusCode.BadRequest,
+        "idle activity older than twenty minutes is rejected over HTTP");
     var menuRequest = await client.GetAsync("/api/Menu/GetMenuTree");
     var menuResponse = await menuRequest.Content.ReadAsStringAsync();
     Require(menuRequest.IsSuccessStatusCode, "menu HTTP access: " + menuResponse);
@@ -334,9 +370,33 @@ try
     Require((await anonymous.GetAsync("/api/system-applications/entry-information?appCode=C")).StatusCode == HttpStatusCode.BadRequest,
         "invalid public system codes are rejected without exposing account configuration");
     var initializeJson = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"1\"}}}";
-    Require((await anonymous.PostAsync("/mcp/v2", JsonBody(initializeJson))).StatusCode == HttpStatusCode.Unauthorized, "anonymous V2 access denied");
-    Require((await anonymous.GetAsync("/api/external/v1/tools")).StatusCode == HttpStatusCode.Unauthorized, "legacy OpenAPI cannot bypass MCP authentication");
-    Require((await client.PostAsync("/mcp/v2", JsonBody(initializeJson))).StatusCode == HttpStatusCode.Unauthorized, "application audience token cannot access MCP");
+    anonymous.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/event-stream");
+    client.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/event-stream");
+    Require((await anonymous.PostAsync("/mcp/v2", JsonBody(initializeJson))).IsSuccessStatusCode, "anonymous V2 initializes without client credentials or token");
+    var anonymousTools = await anonymous.GetAsync("/api/external/v1/tools");
+    Require(anonymousTools.IsSuccessStatusCode && (await anonymousTools.Content.ReadAsStringAsync()).Contains("clawbot.send"), "anonymous OpenAPI exposes the registered read/write catalog");
+    Require((await client.PostAsync("/mcp/v2", JsonBody(initializeJson))).IsSuccessStatusCode, "optional application token does not change anonymous MCP access");
+    Require((await anonymous.PostAsync("/mcp", JsonBody(initializeJson))).IsSuccessStatusCode, "legacy MCP initializes anonymously");
+    var legacyTools = await anonymous.PostAsync("/mcp", JsonBody("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"));
+    Require(legacyTools.IsSuccessStatusCode && (await legacyTools.Content.ReadAsStringAsync()).Contains("project.get"), "legacy MCP lists registered tools anonymously");
+    Require((await anonymous.GetAsync("/api/external-tool-clients")).StatusCode == HttpStatusCode.Unauthorized,
+        "client administration remains login-protected despite open data endpoints");
+    var anonymousRead = await anonymous.PostAsync("/api/external/v1/tools/production.line-runtime", JsonBody("{\"lineCode\":\"L2\"}"));
+    Require(anonymousRead.IsSuccessStatusCode && (await anonymousRead.Content.ReadAsStringAsync()).Contains("L2"),
+        "anonymous read bypasses former user/client resource lists but retains explicit business parameters");
+    var attemptsBefore = BusinessProbe.Calls.Count;
+    var noConfirm = await anonymous.PostAsync("/api/external/v1/tools/device-card.alerts.ack", JsonBody("{\"consumerCode\":\"smoke\",\"alertIds\":[1]}"));
+    Require(noConfirm.StatusCode == HttpStatusCode.BadRequest && (await noConfirm.Content.ReadAsStringAsync()).Contains("confirm") &&
+        BusinessProbe.Calls.Count == attemptsBefore, "anonymous write without confirm is rejected before any business operation");
+    var invalidWrite = await anonymous.PostAsync("/api/external/v1/tools/device-card.alerts.ack", JsonBody("{\"confirm\":true}"));
+    Require(invalidWrite.StatusCode == HttpStatusCode.BadRequest && BusinessProbe.Calls.Count == attemptsBefore,
+        "confirm does not bypass required business parameters");
+    var confirmedWrite = await anonymous.PostAsync("/api/external/v1/tools/device-card.alerts.ack", JsonBody("{\"confirm\":true,\"consumerCode\":\"smoke\",\"alertIds\":[1]}"));
+    Require(confirmedWrite.IsSuccessStatusCode && BusinessProbe.Calls.Count == attemptsBefore + 1,
+        "explicitly confirmed anonymous write invokes only the simulated business method");
+    Require(await db.Queryable<ExternalToolAccessLogEntity>().AnyAsync(x => x.ClientId == "anonymous-mcp" &&
+        x.ToolName == "device-card.alerts.ack" && x.Status == "Attempted" && x.UserId == null && x.AppCode == null),
+        "anonymous write is audited without forging a backend user or application");
     var originalUser = await db.Queryable<SysUserInfo>().FirstAsync(x => x.UserId == "u1");
     Require((await anonymous.GetAsync("/api/user-profile/avatar")).StatusCode == HttpStatusCode.Unauthorized,
         "anonymous users cannot read private avatars");
@@ -425,11 +485,11 @@ try
         "MCP audience token cannot access personal profile APIs");
     mcpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/event-stream");
     var initialize = await mcpClient.PostAsync("/mcp/v2", JsonBody(initializeJson));
-    Require(initialize.IsSuccessStatusCode, "standard V2 initialize with dedicated user token");
+    Require(initialize.IsSuccessStatusCode, "legacy token clients remain compatible with open V2 initialize");
     mcpClient.DefaultRequestHeaders.Add("MCP-Protocol-Version", "2025-06-18");
     var toolsRequest = await mcpClient.PostAsync("/mcp/v2", JsonBody("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"));
     var toolsBody = await toolsRequest.Content.ReadAsStringAsync();
-    Require(toolsRequest.IsSuccessStatusCode && toolsBody.Contains("production.line-runtime") && !toolsBody.Contains("clawbot.send"), "standard V2 lists only authorized tools");
+    Require(toolsRequest.IsSuccessStatusCode && toolsBody.Contains("production.line-runtime") && toolsBody.Contains("clawbot.send"), "standard V2 lists all registered tools without user scope filtering");
     using var adminMcpClient = new HttpClient { BaseAddress = client.BaseAddress };
     adminMcpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", await service.CreateMcpTokenAsync(adminBPrincipal));
     adminMcpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/event-stream");
@@ -438,15 +498,19 @@ try
     var adminToolsBody = await adminTools.Content.ReadAsStringAsync();
     Require(adminTools.IsSuccessStatusCode && adminToolsBody.Contains("clawbot.send") && adminToolsBody.Contains("project."), "admin B wildcard exposes all authorized MCP tools without sending messages");
     var callRequest = await mcpClient.PostAsync("/mcp/v2", JsonBody("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"production.line-runtime\",\"arguments\":{\"lineCode\":\"L2\"}}}"));
-    Require((await callRequest.Content.ReadAsStringAsync()).Contains("isError"), "standard V2 rejects unauthorized resource call");
+    var callBody = await callRequest.Content.ReadAsStringAsync();
+    Require(callRequest.IsSuccessStatusCode && callBody.Contains("L2") && !callBody.Contains("\"isError\":true"), "standard V2 direct caller can read resources outside former token scope");
     await service.RevokeSessionAsync(user);
+    Require((await suspendedClient.GetAsync("/api/system-applications/session")).StatusCode == HttpStatusCode.Unauthorized,
+        "expired token recovery cannot restore a revoked shared session");
     Require((await client.GetAsync("/api/Menu/GetMenuTree")).StatusCode == HttpStatusCode.Unauthorized, "logout revokes app token before menu access");
     Require((await client.GetAsync("/api/user-profile/avatar/info")).StatusCode == HttpStatusCode.Unauthorized,
         "revoked session cannot obtain avatar metadata");
-    Require((await mcpClient.PostAsync("/mcp/v2", JsonBody(initializeJson))).StatusCode == HttpStatusCode.Unauthorized, "logout also revokes user MCP token");
+    Require((await mcpClient.PostAsync("/mcp/v2", JsonBody(initializeJson))).IsSuccessStatusCode, "logout revokes backend access but cannot revoke explicitly anonymous MCP endpoint");
     await db.Insertable(new SysPortalSessionEntity { SessionId = "old-session", UserId = "u1", ExpiresAtUtc = DateTime.UtcNow.AddDays(-2) }).ExecuteCommandAsync();
     await service.CleanupExpiredSessionsAsync(CancellationToken.None);
     Require(!await db.Queryable<SysPortalSessionEntity>().AnyAsync(x => x.SessionId == "old-session"), "expired sessions are cleaned in bounded batches");
+    await VerifyIdleSessionsAsync(scope, options);
     Console.WriteLine("PASS: avatar populated-table migration, real PNG/JPEG/WebP uploads, SQL NULL reset, per-user ownership, A/B sharing and validation.");
     Console.WriteLine("PASS: schema migration, SQL nullability, PKCE replay/concurrency, A/B grants, shared mapping, MCP scopes/audit, HTTP isolation and logout.");
 }
@@ -514,6 +578,81 @@ static void Require(bool condition, string message)
     if (!condition) throw new InvalidOperationException("FAILED: " + message);
 }
 
+static async Task VerifyIdleSessionsAsync(SqlSugarScope scope, IOptionsMonitor<JWTTokenOptions> options)
+{
+    var clock = new SessionTestClock();
+    var service = new SystemApplicationService(scope, options, clock: clock);
+    var db = scope.GetConnectionScope("calmadmin");
+    var handler = new JwtSecurityTokenHandler();
+    await service.RegisterSessionAsync("default-admin", "idle-test");
+    var portal = Principal("default-admin", "admin", "idle-test");
+    var first = await service.GetSessionActivityAsync(portal);
+    var originalDeadline = DateTime.Parse(first.ExpiresAtUtc).ToUniversalTime();
+    clock.Advance(TimeSpan.FromMinutes(19));
+    var beforeWarning = await service.GetSessionActivityAsync(portal);
+    Require(beforeWarning.ExpiresAtUtc == first.ExpiresAtUtc, "read-only status polling never extends session");
+    Require((DateTime.Parse(beforeWarning.ExpiresAtUtc).ToUniversalTime() - clock.GetUtcNow().UtcDateTime).TotalSeconds is > 59 and <= 60,
+        "last-minute warning has a real server deadline");
+    var active = await service.GetSessionActivityAsync(portal, 5000);
+    Require(Math.Abs((DateTime.Parse(active.ExpiresAtUtc).ToUniversalTime() - clock.GetUtcNow().UtcDateTime).TotalSeconds - 1195) < 0.01,
+        "renewal uses last real operation, not timer request time");
+    Require(handler.ReadJwtToken(active.Token!).Claims.Single(x => x.Type == "TokenPurpose").Value == "portal",
+        "portal renewal preserves token purpose");
+    var token = handler.ReadJwtToken(active.Token!);
+    Require(token.ValidTo > originalDeadline && token.Claims.Single(x => x.Type == "SessionId").Value == "idle-test",
+        "renewal replaces expiring signed JWT while preserving session identity");
+
+    // 同会话的 A/B 使用各自令牌和授权，不因续期转换系统身份。
+    foreach (var code in new[] { "A", "B" })
+    {
+        var identity = new ClaimsIdentity(portal.Claims.Where(x => x.Type != "TokenPurpose"), "test");
+        identity.AddClaim(new Claim("TokenPurpose", "app"));
+        identity.AddClaim(new Claim("AppCode", code));
+        var appPrincipal = new ClaimsPrincipal(identity);
+        var state = await service.GetSessionActivityAsync(appPrincipal);
+        var appToken = handler.ReadJwtToken(state.Token!);
+        Require(appToken.Claims.Single(x => x.Type == "AppCode").Value == code &&
+            appToken.Claims.Single(x => x.Type == "TokenPurpose").Value == "app",
+            "A/B token renewal retains its original system and purpose");
+        Require(handler.ReadJwtToken(state.PortalToken!).Claims.Single(x => x.Type == "TokenPurpose").Value == "portal",
+            "portal credential is refreshed alongside application credential");
+    }
+    var stable = (await db.Queryable<SysPortalSessionEntity>().InSingleAsync("idle-test")).ExpiresAtUtc;
+    await service.GetSessionActivityAsync(portal, 60_000);
+    Require((await db.Queryable<SysPortalSessionEntity>().InSingleAsync("idle-test")).ExpiresAtUtc == stable,
+        "delayed activity cannot shorten another tab's later deadline");
+    await Task.WhenAll(Enumerable.Range(0, 8).Select(index => service.GetSessionActivityAsync(portal, index * 1000)));
+    Require((await db.Queryable<SysPortalSessionEntity>().InSingleAsync("idle-test")).ExpiresAtUtc == clock.GetUtcNow().UtcDateTime.AddMinutes(20),
+        "concurrent page renewals retain the latest deadline");
+    for (var index = 0; index < 5; index++)
+    {
+        clock.Advance(TimeSpan.FromMinutes(10));
+        await service.GetSessionActivityAsync(portal, 0);
+    }
+    Require((await service.GetAccessAsync(portal)).SessionId == "idle-test", "active session works beyond original twenty minutes");
+    var current = await service.GetSessionActivityAsync(portal);
+    var currentPrincipal = new ClaimsPrincipal(new ClaimsIdentity(handler.ReadJwtToken(current.Token!).Claims, "test"));
+    Require((await service.GetSessionActivityAsync(currentPrincipal)).Token == null,
+        "fresh token is not replaced on every poll");
+    await service.RevokeSessionAsync(portal);
+    await Denied(() => service.GetSessionActivityAsync(currentPrincipal, 0), "revoked session cannot renew with signed token");
+    await service.RegisterSessionAsync("default-admin", "idle-expired");
+    var expired = Principal("default-admin", "admin", "idle-expired");
+    clock.Advance(TimeSpan.FromMinutes(20));
+    await Denied(() => service.GetSessionActivityAsync(expired, 0), "exact twenty-minute expiry cannot be revived");
+    var removedGrant = new ClaimsPrincipal(new ClaimsIdentity([
+        new Claim("Id", "default-admin"), new Claim("Name", "admin"), new Claim("SessionId", "idle-no-grant"),
+        new Claim("TokenPurpose", "app"), new Claim("AppCode", "B")], "test"));
+    await service.RegisterSessionAsync("default-admin", "idle-no-grant");
+    await db.Updateable<SysUserApplicationEntity>().SetColumns(x => x.Enabled == false)
+        .Where(x => x.UserId == "default-admin" && x.AppCode == "B").ExecuteCommandAsync();
+    await Denied(() => service.GetSessionActivityAsync(removedGrant, 0), "renewal checks current A/B grants");
+    await db.Updateable<SysUserInfo>().SetColumns(x => x.Enabled == false).Where(x => x.UserId == "default-admin").ExecuteCommandAsync();
+    await Denied(() => service.GetSessionActivityAsync(Principal("default-admin", "admin", "idle-no-grant"), 0),
+        "disabled account cannot renew even with a portal credential");
+    Console.WriteLine("PASS: idle SQL + HTTP status/renewal, exact expiry, elapsed operation time, JWT rotation, A/B identity, revocation and disabled accounts.");
+}
+
 static async Task Denied(Func<Task> callback, string message)
 {
     try { await callback(); } catch (UnauthorizedAccessException) { return; }
@@ -527,6 +666,13 @@ sealed class ConstantOptions<T>(T value) : IOptionsMonitor<T>
     public IDisposable? OnChange(Action<T, string?> listener) => null;
 }
 
+sealed class SessionTestClock : TimeProvider
+{
+    private DateTimeOffset _now = DateTimeOffset.FromUnixTimeSeconds(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+    public override DateTimeOffset GetUtcNow() => _now;
+    public void Advance(TimeSpan duration) => _now += duration;
+}
+
 public class BusinessProbe : DispatchProxy
 {
     public static List<string> Calls { get; } = [];
@@ -536,6 +682,11 @@ public class BusinessProbe : DispatchProxy
         {
             Calls.Add("line:" + args![0]);
             return Task.FromResult(new EdgeDashboardLineRuntimeDto { LineCode = (string)args[0]! });
+        }
+        if (method.Name == "AcknowledgeDeviceCardAlertsAsync")
+        {
+            Calls.Add("simulated-ack");
+            return Task.FromResult(1);
         }
         throw new InvalidOperationException("Unexpected business call: " + method.Name);
     }

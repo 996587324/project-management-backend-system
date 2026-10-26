@@ -5,6 +5,10 @@ namespace Interface;
 
 public interface IWeChatClawBotService
 {
+    /// <summary>通用队列专用发送，固定收件绑定，保留平台预算和不确定结果分类。</summary>
+    Task<WeChatClawBotDeliveryDto> SendQueuedMessageAsync(string userId, string content, string idempotencyKey,
+        string taskId, string bindingIdentity, CancellationToken cancellationToken, string source = "AgentPush") =>
+        throw new NotSupportedException("当前适配器尚不支持微信通用队列");
     Task<WeChatClawBotDeliveryDto> SendAiMessageAsync(string userId, string content, string idempotencyKey,
         string bindingIdentity, CancellationToken cancellationToken = default);
     Task<WeChatClawBotDeliveryDto> SendSystemMessageAsync(string userId, string content, string idempotencyKey,

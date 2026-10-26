@@ -23,14 +23,18 @@ public sealed class SystemApplicationService : ISystemApplicationService
     private readonly JWTTokenOptions _jwt;
     private readonly IHttpContextAccessor? _httpContextAccessor;
     private readonly ISystemApplicationMenuService? _menus;
+    private readonly TimeProvider _clock;
+    private const int IdleTimeoutMinutes = 20;
 
     public SystemApplicationService(SqlSugarScope scope, IOptionsMonitor<JWTTokenOptions> options,
-        IHttpContextAccessor? httpContextAccessor = null, ISystemApplicationMenuService? menus = null)
+        IHttpContextAccessor? httpContextAccessor = null, ISystemApplicationMenuService? menus = null,
+        TimeProvider? clock = null)
     {
         _scope = scope;
         _jwt = options.CurrentValue;
         _httpContextAccessor = httpContextAccessor;
         _menus = menus;
+        _clock = clock ?? TimeProvider.System;
     }
 
     private ISqlSugarClient Db => DatabaseOperationScope.GetConnection(_scope, "calmadmin");
@@ -43,7 +47,7 @@ public sealed class SystemApplicationService : ISystemApplicationService
         {
             SessionId = Require(sessionId, 64, "会话编号"),
             UserId = user.UserId,
-            ExpiresAtUtc = DateTime.UtcNow.AddMinutes(20)
+            ExpiresAtUtc = _clock.GetUtcNow().UtcDateTime.AddMinutes(IdleTimeoutMinutes)
         }).ExecuteCommandAsync();
     }
 
@@ -62,7 +66,7 @@ public sealed class SystemApplicationService : ISystemApplicationService
         }
         var sessionId = principal.FindFirst("SessionId")?.Value ?? string.Empty;
         var session = await Db.Queryable<SysPortalSessionEntity>().FirstAsync(x => x.SessionId == sessionId);
-        if (session == null || session.RevokedAtUtc != null || session.ExpiresAtUtc <= DateTime.UtcNow)
+        if (session == null || session.RevokedAtUtc != null || session.ExpiresAtUtc <= _clock.GetUtcNow().UtcDateTime)
             throw new UnauthorizedAccessException("统一登录会话已失效，请重新登录");
         var user = await FindUserAsync(session.UserId);
         // 主体和会话必须一致，不能通过提交任意 SessionId 使用他人的授权。
@@ -208,6 +212,45 @@ public sealed class SystemApplicationService : ISystemApplicationService
             .Where(x => x.SessionId == access.SessionId && x.RevokedAtUtc == null).ExecuteCommandAsync();
     }
 
+    /// <summary>
+    /// GET 只读取会话；POST 按最近真实操作距今的时长续期。普通 API、在线心跳不会续期。
+    /// 更新条件同时检查撤销和过期，旧标签页不能恢复已失效的会话，也不能缩短其他页面的有效期。
+    /// </summary>
+    public async Task<SessionActivityResult> GetSessionActivityAsync(ClaimsPrincipal principal, int? idleMilliseconds = null)
+    {
+        using var operation = DatabaseOperationScope.Begin(_scope);
+        var purpose = principal.FindFirst("TokenPurpose")?.Value;
+        if (purpose is not ("portal" or "app")) throw new UnauthorizedAccessException("请使用统一入口重新登录");
+        var timeoutMilliseconds = IdleTimeoutMinutes * 60 * 1000;
+        if (idleMilliseconds is < 0 || idleMilliseconds >= timeoutMilliseconds)
+            throw new ArgumentException("操作时间已失效或不合法");
+        var access = await GetAccessAsync(principal, purpose == "app");
+        var now = _clock.GetUtcNow().UtcDateTime;
+        if (idleMilliseconds.HasValue)
+        {
+            var deadline = now.AddMilliseconds(timeoutMilliseconds - idleMilliseconds.Value);
+            await Db.Updateable<SysPortalSessionEntity>()
+                .SetColumns(x => x.ExpiresAtUtc == deadline)
+                .Where(x => x.SessionId == access.SessionId && x.RevokedAtUtc == null &&
+                    x.ExpiresAtUtc > now && x.ExpiresAtUtc < deadline).ExecuteCommandAsync();
+        }
+        var session = await Db.Queryable<SysPortalSessionEntity>().FirstAsync(x => x.SessionId == access.SessionId);
+        if (session == null || session.RevokedAtUtc != null || session.ExpiresAtUtc <= now)
+            throw new UnauthorizedAccessException("统一登录会话已失效，请重新登录");
+        var expiryClaim = principal.FindFirst(JwtRegisteredClaimNames.Exp)?.Value;
+        // 提前更新即将过期的令牌；读取状态不会改变会话截止时间。
+        var renewToken = !long.TryParse(expiryClaim, out var expiry) ||
+            expiry <= new DateTimeOffset(now).ToUnixTimeSeconds() + 10 * 60;
+        var user = renewToken ? await FindUserAsync(access.UserId) : null;
+        return new SessionActivityResult
+        {
+            SessionId = session.SessionId, ServerTimeUtc = now.ToString("O"),
+            ExpiresAtUtc = DateTime.SpecifyKind(session.ExpiresAtUtc, DateTimeKind.Utc).ToString("O"),
+            Token = user == null ? null : CreateToken(user, session, access.AppCode, purpose, _jwt.Audience),
+            PortalToken = user == null ? null : CreateToken(user, session, "", "portal", _jwt.Audience)
+        };
+    }
+
     public async Task SaveApplicationAsync(ClaimsPrincipal principal, SysApplicationEntity application)
     {
         using var operation = DatabaseOperationScope.Begin(_scope);
@@ -345,7 +388,9 @@ public sealed class SystemApplicationService : ISystemApplicationService
         };
         return new JwtSecurityTokenHandler().WriteToken(new JwtSecurityToken(_jwt.Issuer, audience, claims,
             // SQL Server datetime 不保留 Kind；该列约定存储 UTC，不能再次按本地时区换算。
-            expires: DateTime.SpecifyKind(session.ExpiresAtUtc, DateTimeKind.Utc),
+            // 浏览器令牌略晚于会话过期，便于多页面在有效会话内换新；鉴权仍每次检查会话。
+            expires: DateTime.SpecifyKind(purpose is "app" or "portal"
+                ? session.ExpiresAtUtc.AddMinutes(5) : session.ExpiresAtUtc, DateTimeKind.Utc),
             signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwt.SecurityKey)), SecurityAlgorithms.HmacSha256)));
     }
 

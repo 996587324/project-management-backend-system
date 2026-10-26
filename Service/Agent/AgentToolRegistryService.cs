@@ -104,7 +104,8 @@ public class AgentToolRegistryService : IAgentToolRegistryService
             .Where(x => !x.Key.Equals(AgentCodes.QueryAssistant, StringComparison.OrdinalIgnoreCase))
             .SelectMany(x => x.Value.Tools)
             .Concat(_toolActions.Select(x => x.Definition))
-            .Where(x => !x.IsWriteAction);
+            .Where(x => !x.IsWriteAction)
+            .DistinctBy(x => x.ToolName, StringComparer.OrdinalIgnoreCase);
 
         return sourceTools.Select(tool => new AgentToolSeed
         {
