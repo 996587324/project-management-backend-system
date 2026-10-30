@@ -44,7 +44,14 @@ public sealed partial class WeChatPushQueueService
             try
             {
                 var external = McpPushAccess.IsExternal(job.AppCode, job.CreatedBy);
-                if (!external)
+                var workTask = job.SourceLabel == "WorkTask" && job.CreatedBy.StartsWith(WorkTaskChannelPolicy.Prefix, StringComparison.Ordinal);
+                if (workTask)
+                {
+                    if (!await WorkTaskChannelPolicy.AuthorizeAsync(Db, job.CreatedBy, job.AppCode, job.RecipientUserId, "WeChat"))
+                        throw new UnauthorizedAccessException("工作任务通知来源或接收范围已失效");
+                    await applications.GetChannelAccessAsync(job.RecipientUserId, job.AppCode);
+                }
+                if (!external && !workTask)
                 {
                     var access = await applications.GetChannelAccessAsync(job.CreatedBy, job.AppCode);
                     await RequireSenderAsync(access);
@@ -57,7 +64,7 @@ public sealed partial class WeChatPushQueueService
                 timeout.CancelAfter(TimeSpan.FromMinutes(2));
                 var delivery = await weChat.SendQueuedMessageAsync(job.RecipientUserId, job.Content,
                     $"push:{job.Id}:{job.Attempt}", job.Id.ToString(), job.BindingIdentity, timeout.Token,
-                    external ? "MCP" : "AgentPush");
+                    external ? "MCP" : workTask ? "WorkTask" : "AgentPush");
                 job.DeliveryId = delivery.Id;
                 job.Status = delivery.Status is "Sent" or "Failed" ? delivery.Status : "Unknown";
                 job.Error = delivery.ErrorMessage is { Length: > 1000 } error ? error[..1000] : delivery.ErrorMessage;

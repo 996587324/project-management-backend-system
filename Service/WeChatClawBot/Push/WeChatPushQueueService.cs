@@ -74,6 +74,9 @@ public sealed partial class WeChatPushQueueService(
             throw new ArgumentException("外部任务编号或来源标签过长");
         if (string.Equals(dto.SourceLabel, "AI", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException("AI为系统保留消息来源");
+        if (string.Equals(dto.SourceLabel, "WorkTask", StringComparison.OrdinalIgnoreCase)
+            && !createdBy.StartsWith(WorkTaskChannelPolicy.Prefix, StringComparison.Ordinal))
+            throw new ArgumentException("工作任务为系统保留消息来源");
         var ids = dto.RecipientUserIds.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Where(x => x.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToArray();
         if (ids.Length is 0 or > 100 || ids.Any(x => x.Length > 64)) throw new ArgumentException("单次需选择1至100位真实接收用户");

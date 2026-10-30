@@ -34,12 +34,16 @@ public sealed class HourlyProductionController(
         return Success(await service.ListAsync(access));
     }
 
+    [HttpGet("definitions/{code}/removed-processes")]
+    public async Task<IActionResult> RemovedProcesses(string code, [FromQuery] string lineCode) =>
+        Success(await service.RemovedProcessesAsync(await Access(), code, lineCode));
+
     [HttpPost("definitions")]
     [RequestSizeLimit(2 * 1024 * 1024)]
     public async Task<IActionResult> Save(HourlyBoardDefinition definition) => Success(await service.SaveAsync(await Access(), definition));
 
     [HttpGet("runtime")]
-    public async Task<IActionResult> Runtime(string code) => Success(await service.RuntimeAsync(await Access(), code));
+    public async Task<IActionResult> Runtime(string code, bool previous = false) => Success(await service.RuntimeAsync(await Access(), code, previous: previous));
 
     [HttpGet("reports")]
     public async Task<IActionResult> Reports(string code, int page = 1) => Success(await service.ReportsAsync(await Access(), code, page));
@@ -138,8 +142,8 @@ public sealed class HourlyProductionController(
 public sealed class HourlyProductionPublicController(IHourlyProductionService service) : ControllerBase
 {
     [HttpGet("runtime")]
-    public async Task<IActionResult> Runtime(string code) =>
-        new JsonResult(new { code = 200, msg = "success", data = await service.RuntimeAsync(null, code, publicRead: true) },
+    public async Task<IActionResult> Runtime(string code, bool previous = false) =>
+        new JsonResult(new { code = 200, msg = "success", data = await service.RuntimeAsync(null, code, publicRead: true, previous: previous) },
             new Newtonsoft.Json.JsonSerializerSettings
             {
                 ContractResolver = new Newtonsoft.Json.Serialization.CamelCasePropertyNamesContractResolver()

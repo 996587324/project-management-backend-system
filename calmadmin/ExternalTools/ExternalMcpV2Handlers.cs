@@ -5,6 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Model.ExternalTools;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using Model.WorkTasks;
+using calmadmin.WorkTasks;
 
 namespace calmadmin.Controllers.ExternalTools;
 
@@ -21,6 +23,8 @@ internal static class ExternalMcpV2Handlers
     {
         cancellationToken.ThrowIfCancellationRequested();
         var services = request.Services ?? throw new InvalidOperationException("MCP 请求服务上下文不可用");
+        if (services.GetService<IHttpContextAccessor>()?.HttpContext?.Items[typeof(WorkActor)] is WorkActor workActor)
+            return WorkTaskMcpTools.List(workActor);
         var caller = await GetCallerAsync(services);
         var service = services.GetRequiredService<IExternalToolService>();
         var tools = service.GetDefinitions(caller)
@@ -47,6 +51,8 @@ internal static class ExternalMcpV2Handlers
         CancellationToken cancellationToken)
     {
         var services = request.Services ?? throw new InvalidOperationException("MCP 请求服务上下文不可用");
+        if (services.GetService<IHttpContextAccessor>()?.HttpContext?.Items[typeof(WorkActor)] is WorkActor workActor)
+            return await WorkTaskMcpTools.Call(services.GetRequiredService<IWorkTaskService>(), workActor, request.Params.Name ?? "", ToJsonElement(request.Params.Arguments), services.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>().CreateLogger("WorkTaskMcp"));
         var service = services.GetRequiredService<IExternalToolService>();
         var httpContext = services.GetService<IHttpContextAccessor>()?.HttpContext;
         var result = await service.ExecuteAsync(

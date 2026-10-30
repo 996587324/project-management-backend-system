@@ -180,6 +180,10 @@ namespace 上传MES.Config
             builder.Services.AddHostedService<ProcessBoardExportHostedService>();
             builder.Services.AddMemoryCache();
             builder.Services.AddSingleton<HourlyProductionCatalog>();
+            builder.Services.Configure<Model.WorkTasks.WorkTaskOptions>(builder.Configuration.GetSection("WorkTasks"));
+            builder.Services.AddSingleton<Interface.IWorkTaskInitializer, Service.WorkTaskInitializer>();
+            builder.Services.AddScoped<Interface.IWorkTaskService, Service.WorkTaskService>();
+            builder.Services.AddHostedService<calmadmin.HostedServices.WorkTaskHostedService>();
             builder.Services.AddSingleton<IHourlyProductionInitializer, HourlyProductionInitializer>();
             builder.Services.AddHostedService<HourlyProductionHostedService>();
             builder.Services.AddHostedService<HourlyProductionAiHostedService>();

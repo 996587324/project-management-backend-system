@@ -40,7 +40,7 @@ builder.Services
     .AddMcpServer(options =>
     {
         options.ServerInfo = mcpV2ServerInfoProvider.ServerInfo;
-        options.ServerInstructions = "内网免认证直连，提供已登记的业务工具；写操作必须提供明确业务参数并显式传入 confirm: true。";
+        options.ServerInstructions = "按当前入口和已验证身份提供已登记的业务工具。个人工作任务入口必须使用本人凭证，仅办理本人获准任务；写操作先核对内容、版本和授权，不编造进展或材料。";
     })
     .WithHttpTransport(options => options.Stateless = true)
     .WithListToolsHandler(ExternalMcpV2Handlers.ListToolsAsync)
@@ -87,6 +87,7 @@ app.UseRouting();
 app.UseCors("AllowAll");
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<calmadmin.WorkTasks.WorkTaskPersonalAccessMiddleware>();
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/mcp/v2"))
@@ -111,6 +112,18 @@ app.Use(async (context, next) =>
 #endregion
 app.MapControllers();
 app.MapMcp("/mcp/v2").AllowAnonymous();
+app.MapMcp("/mcp/work-tasks").AllowAnonymous(); // 上面的个人凭证中间件保护整个协议入口。
+app.MapGet("/mcp/work-tasks/files/{id}", async (HttpContext context, string id, IWorkTaskService service) =>
+{
+    try
+    {
+        var actor=(Model.WorkTasks.WorkActor)context.Items[typeof(Model.WorkTasks.WorkActor)]!;
+        var file=await service.DownloadAsync(actor,id);
+        context.Response.Headers.XContentTypeOptions="nosniff";
+        return Results.File(file.Path,file.ContentType,file.Name);
+    }
+    catch (UnauthorizedAccessException) { return Results.StatusCode(403); }
+}).AllowAnonymous();
 app.MapGet("/ws/agent", async (HttpContext context, AgentWebSocketHandler handler) =>
 {
     await handler.HandleAsync(context);

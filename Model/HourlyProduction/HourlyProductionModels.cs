@@ -173,12 +173,28 @@ public sealed class HourlyProductionAdviceEntity
     public DateTime? ExpiresAt { get; set; }
 }
 
+public sealed class HourlyShiftPlan
+{
+    public DateTime EffectiveAt { get; set; }
+    public string DayStart { get; set; } = "08:00";
+    public string NightStart { get; set; } = "20:00";
+    public Dictionary<string,List<decimal?>> DayTargets { get; set; } = new();
+    public Dictionary<string,List<decimal?>> NightTargets { get; set; } = new();
+}
+
 public sealed class HourlyBoardDefinition
 {
+    public List<HourlyRemovedLine> RemovedLines { get; set; } = [];
+    public HourlyBoardLayout? Layout { get; set; }
+    public DateTime? CancelShiftEffectiveAt { get; set; }
+    public List<HourlyShiftCancellation> CancelledShifts { get; set; } = [];
     public string Code { get; set; } = "";
     public string Name { get; set; } = "小时产量与目标看板";
     public int Version { get; set; }
     public bool Published { get; set; }
+    public Dictionary<string,List<decimal?>>? LegacyTargets { get; set; }
+    public List<HourlyShiftPlan> ShiftHistory { get; set; } = [];
+    public HourlyShiftPlan? ShiftChange { get; set; }
     public string StartTime { get; set; } = "08:00";
     public string EndTime { get; set; } = "20:00";
     public int RefreshSeconds { get; set; } = 10;
@@ -187,6 +203,27 @@ public sealed class HourlyBoardDefinition
     public string AiAgentCode { get; set; } = "production-dashboard";
     public List<HourlyLineDefinition> Lines { get; set; } = [];
     public HourlyPushSetting Push { get; set; } = new();
+}
+
+public sealed class HourlyShiftCancellation
+{
+    public HourlyShiftPlan Plan { get; set; } = new();
+    public DateTime CancelledAt { get; set; }
+    public string CancelledBy { get; set; } = "";
+}
+
+public sealed class HourlyRemovedLine
+{
+    public HourlyLineDefinition Definition { get; set; } = new();
+    public DateTime RemovedAt { get; set; }
+    public string RemovedBy { get; set; } = "";
+}
+
+public sealed class HourlyBoardLayout
+{
+    public string Mode { get; set; } = "Compare";
+    public int RotationSeconds { get; set; } = 15;
+    public List<List<string>> Groups { get; set; } = [];
 }
 
 public sealed class HourlyLineDefinition
@@ -200,6 +237,10 @@ public sealed class HourlyLineDefinition
 
 public sealed class HourlyProcessDefinition
 {
+    // 统计身份由服务端分配；旧工序沿用 line/code，新实例使用不重复的内部键。
+    public string InstanceId { get; set; } = "";
+    public string CreationMode { get; set; } = "";
+    public DateTime? ActiveSince { get; set; }
     public string Code { get; set; } = "";
     public string Name { get; set; } = "";
     public string RowCode { get; set; } = "";
@@ -210,6 +251,34 @@ public sealed class HourlyProcessDefinition
     public bool IncludeReworkInOutput { get; set; }
     public List<HourlyBinding> Bindings { get; set; } = [];
     public List<decimal?> Targets { get; set; } = [];
+}
+
+[SugarTable("HourlyProductionProcess")]
+[SugarIndex("UX_HourlyProcess_Key", nameof(BoardCode), OrderByType.Asc, nameof(ProcessKey), OrderByType.Asc, true)]
+public sealed class HourlyProductionProcessEntity
+{
+    [SugarColumn(IsPrimaryKey = true, Length = 64)] public string Id { get; set; } = "";
+    [SugarColumn(Length = 64)] public string BoardCode { get; set; } = "";
+    [SugarColumn(Length = 64)] public string ProcessKey { get; set; } = "";
+    [SugarColumn(Length = 30)] public string LineCode { get; set; } = "";
+    [SugarColumn(Length = 30)] public string Code { get; set; } = "";
+    [SugarColumn(ColumnDataType = "nvarchar(100)")] public string Name { get; set; } = "";
+    [SugarColumn(IsNullable = true, ColumnDataType = "nvarchar(max)")] public string? DefinitionJson { get; set; }
+    public bool Active { get; set; }
+    [SugarColumn(IsNullable = true)] public DateTime? ActivatedAt { get; set; }
+    [SugarColumn(IsNullable = true)] public DateTime? RemovedAt { get; set; }
+}
+
+public sealed class HourlyRemovedProcess
+{
+    public string InstanceId { get; set; } = "";
+    public string LineCode { get; set; } = "";
+    public string Code { get; set; } = "";
+    public string Name { get; set; } = "";
+    public DateTime? RemovedAt { get; set; }
+    public bool CanRestore { get; set; }
+    public string Reason { get; set; } = "";
+    public HourlyProcessDefinition? Definition { get; set; }
 }
 
 public sealed class HourlyBinding
@@ -240,6 +309,10 @@ public sealed class HourlyPushSetting
 
 public sealed class HourlyBoardRuntime
 {
+    public HourlyBoardLayout? Layout { get; set; }
+    public string ShiftName { get; set; } = "原班次";
+    public DateTime ShiftStart { get; set; }
+    public DateTime ShiftEnd { get; set; }
     public string Code { get; set; } = "";
     public string Name { get; set; } = "";
     public int Version { get; set; }

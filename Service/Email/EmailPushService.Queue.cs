@@ -37,9 +37,11 @@ public sealed partial class EmailPushService
             var task = await Db.Queryable<EmailPushTaskEntity>().InSingleAsync(delivery.TaskId);
             var recipient = await Db.Queryable<SysUserInfo>().FirstAsync(x => x.UserId == delivery.RecipientUserId);
             var external = task != null && task.Source == "MCP" && McpPushAccess.IsExternal(task.AppCode, task.CreatedBy);
-            var sender = task == null || external ? null : await Db.Queryable<SysUserInfo>().FirstAsync(x => x.UserId == task.CreatedBy);
+            var workTask = task != null && task.Source == "WorkTask";
+            var workAuthorized = workTask && await WorkTaskChannelPolicy.AuthorizeAsync(Db, task!.CreatedBy, task.AppCode, delivery.RecipientUserId, "Email");
+            var sender = task == null || external || workTask ? null : await Db.Queryable<SysUserInfo>().FirstAsync(x => x.UserId == task.CreatedBy);
             var senderAuthorized = true;
-            if (task != null && !external && applications != null)
+            if (task != null && !external && !workTask && applications != null)
             {
                 try
                 {
@@ -52,7 +54,7 @@ public sealed partial class EmailPushService
                     senderAuthorized = false;
                 }
             }
-            if (!senderAuthorized || task == null || !external && sender?.Enabled != true || recipient?.Enabled != true ||
+            if (!senderAuthorized || task == null || workTask && !workAuthorized || !external && !workTask && sender?.Enabled != true || recipient?.Enabled != true ||
                 !IsValidAddress(recipient.Email) || !recipient.Email.Trim().Equals(delivery.Address, StringComparison.OrdinalIgnoreCase))
             {
                 await Db.Updateable<EmailPushDeliveryEntity>()

@@ -67,6 +67,7 @@ namespace calmadmin.Controllers
             {
                 menu.children = FilterMenus(menu.children, assigned, access);
                 var allowed = assigned.Contains(menu.id) && access.HasPermission(menu.name);
+                if (menu.name.StartsWith("WorkTasks", StringComparison.Ordinal)) allowed = assigned.Contains(menu.id) && access.Permissions.Contains(menu.name);
                 if (menu.name == "ApplicationAdministration") allowed = assigned.Contains(menu.id) && access.PlatformAdministrator;
                 if (menu.name is "SharedModelDictionary" or "SystemBSharedModelDictionary")
                     allowed = assigned.Contains(menu.id) && (access.PlatformAdministrator || access.HasPermission("shared-dictionary.read"));

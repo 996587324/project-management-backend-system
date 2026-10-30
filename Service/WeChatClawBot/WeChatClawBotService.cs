@@ -358,7 +358,7 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
     public async Task<WeChatClawBotDeliveryDto> SendQueuedMessageAsync(string userId, string content,
         string idempotencyKey, string taskId, string bindingIdentity, CancellationToken cancellationToken, string source = "AgentPush")
     {
-        if (source is not ("AgentPush" or "MCP")) throw new ArgumentException("不支持的队列来源");
+        if (source is not ("AgentPush" or "MCP" or "WorkTask")) throw new ArgumentException("不支持的队列来源");
         await SystemSendGate.WaitAsync(cancellationToken);
         try
         {
@@ -502,6 +502,8 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
         await EnsureInitializedAsync(cancellationToken);
         var original = await Db.Queryable<WeChatClawBotDeliveryEntity>().InSingleAsync(deliveryId)
             ?? throw new InvalidOperationException("投递记录不存在。");
+        if (original.Source == "WorkTask")
+            throw new InvalidOperationException("工作任务通知请通过工作任务管理重新校验授权后重试。");
         if (original.Source == "AI")
             throw new InvalidOperationException("AI 回复不支持脱离原授权任务重试，请在微信重新发送请求。");
         if (original.Status != "Failed") throw new InvalidOperationException("仅失败的投递记录可以重试。");
@@ -1012,7 +1014,8 @@ public sealed class WeChatClawBotService : IWeChatClawBotService
     private static WeChatClawBotDeliveryDto ToDeliveryDto(WeChatClawBotDeliveryEntity entity) => new()
     {
         Id = entity.Id, RetryOfDeliveryId = entity.RetryOfDeliveryId, UserId = entity.UserId, UserName = entity.UserName, Source = entity.Source,
-        ExternalTaskId = entity.ExternalTaskId, IdempotencyKey = entity.IdempotencyKey, Content = entity.Content,
+        ExternalTaskId = entity.ExternalTaskId, IdempotencyKey = entity.IdempotencyKey,
+        Content = entity.Source == "WorkTask" ? "工作任务通知（内容请在工作任务收件箱查看）" : entity.Content,
         Status = entity.Status, WeChatMessageId = entity.WeChatMessageId, AttemptCount = entity.AttemptCount,
         DurationMs = entity.DurationMs, ErrorMessage = entity.ErrorMessage, SentTime = entity.SentTime,
         CreateTime = entity.CreateTime

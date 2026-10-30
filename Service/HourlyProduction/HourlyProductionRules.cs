@@ -14,6 +14,8 @@ public static class HourlyProductionRules
 
     public static (DateTime Start, DateTime End) Window(HourlyBoardDefinition board, DateTime time)
     {
+        var plan = Plan(board,time);
+        if (plan != null) { var w=HourlyShiftRules.At(plan.DayStart,plan.NightStart,time); return (w.Start,w.End); }
         var start = TimeSpan.ParseExact(board.StartTime, @"hh\:mm", CultureInfo.InvariantCulture);
         var end = TimeSpan.ParseExact(board.EndTime, @"hh\:mm", CultureInfo.InvariantCulture);
         var date = time.Date;
@@ -29,6 +31,33 @@ public static class HourlyProductionRules
         for (var start = window.Start; start < window.End; start = start.AddHours(1))
             result.Add((start, start.AddHours(1) < window.End ? start.AddHours(1) : window.End));
         return result;
+    }
+
+    public static HourlyShiftPlan? Plan(HourlyBoardDefinition board, DateTime time) => board.ShiftHistory.Where(x=>x.EffectiveAt<=time).OrderByDescending(x=>x.EffectiveAt).FirstOrDefault();
+
+    public static HourlyShiftPlan CancelPendingShift(HourlyBoardDefinition board, DateTime effectiveAt, DateTime now)
+    {
+        var target = board.ShiftHistory.SingleOrDefault(x => x.EffectiveAt == effectiveAt)
+            ?? throw new ArgumentException("要撤销的班次版本不存在，请刷新后重试");
+        if (target.EffectiveAt <= now) throw new InvalidOperationException("该班次版本已生效，不能撤销");
+        var remaining = board.ShiftHistory.Where(x => x != target).OrderBy(x => x.EffectiveAt).ToList();
+        // 在副本上校验剩余版本，失败时不修改原配置。
+        var preceding = new HourlyBoardDefinition { StartTime=board.StartTime, EndTime=board.EndTime };
+        foreach (var next in remaining)
+        {
+            if (next.EffectiveAt > effectiveAt && Window(preceding, next.EffectiveAt.AddTicks(-1)).End != next.EffectiveAt)
+                throw new InvalidOperationException("撤销后会导致后续班次无法衔接，请先撤销后续版本");
+            preceding.ShiftHistory.Add(next);
+        }
+        board.ShiftHistory = remaining;
+        return target;
+    }
+
+    public static List<decimal?> Targets(HourlyBoardDefinition board, DateTime time, string key, List<decimal?> legacy)
+    {
+        var p=Plan(board,time); if(p==null)return board.LegacyTargets?.GetValueOrDefault(key) ?? legacy;
+        var values=HourlyShiftRules.At(p.DayStart,p.NightStart,time).Code=="Day"?p.DayTargets:p.NightTargets;
+        return values.GetValueOrDefault(key) ?? [];
     }
 
     /// <summary>按事件时间重放同 SN 的有效过站；与上一次有效过站比较，抖动报文不会延长抑制窗口。</summary>

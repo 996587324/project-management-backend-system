@@ -46,11 +46,11 @@ internal static class HourlyDeletionSmoke
         stale.Lines[0].Processes.RemoveAll(x => x.Code == "P3");
         await Invalid(() => service.SaveAsync(access, stale), "总产出口径");
         stale.Lines[0].SummaryProcessCode = "P2";
-        await service.SaveAsync(access, stale);
-        var incomplete = Clone(board);
+        stale = await service.SaveAsync(access, stale);
+        var incomplete = Clone(stale);
         incomplete.Lines[1].Processes[1].Bindings[0].DeviceKey = "";
         await Invalid(() => service.SaveAsync(access, incomplete), "线体“L2”工序“工序P2”数据绑定 1");
-        var removeIncomplete = Clone(board);
+        var removeIncomplete = Clone(stale);
         removeIncomplete.Lines[1].Processes[1].Bindings[0].DeviceKey = "";
         removeIncomplete.Lines[1].Processes.RemoveAt(1);
         // 使用最新版本，只需验证剩余配置，已经删除的工序不参与校验。

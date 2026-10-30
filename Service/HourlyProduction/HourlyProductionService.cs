@@ -57,33 +57,83 @@ public sealed partial class HourlyProductionService(
              definition.Push.EmailUserIds.Count > 0 && !access.HasPermission("EmailPush")))
             throw new UnauthorizedAccessException("启用推送需要对应微信或邮件推送权限");
         using var operation = DatabaseOperationScope.Begin(scope);
-        var old = await Db.Queryable<HourlyProductionBoardEntity>().InSingleAsync(definition.Code);
-        if (old != null)
+        var saved = await Db.Ado.UseTranAsync(async () =>
         {
-            if (old.AppCode != access.AppCode || !CanRead(access, Definition(old)))
-                throw new UnauthorizedAccessException("不可修改其他系统或未授权的看板");
-            if (old.Version != definition.Version) throw new InvalidOperationException("配置已被修改，请刷新后重试");
-            await ProtectHistoryAsync(Definition(old), definition);
-        }
-        else if (definition.Version != 0) throw new InvalidOperationException("看板不存在，请重新创建");
-        var expectedVersion = definition.Version;
-        definition.Version++;
-        var row = new HourlyProductionBoardEntity
-        {
-            Code = definition.Code, AppCode = access.AppCode, DefinitionJson = JsonSerializer.Serialize(definition),
-            Version = definition.Version, Published = definition.Published, UpdatedBy = access.UserId,
-            UpdateTime = HourlyProductionRules.Now
-        };
-        if (old == null) await Db.Insertable(row).ExecuteCommandAsync();
-        else if (await Db.Updateable(row).Where(x => x.Code == row.Code && x.Version == expectedVersion).ExecuteCommandAsync() == 0)
-            throw new InvalidOperationException("配置已被修改，请刷新后重试");
+            await HourlyProcessLifecycle.LockAsync(Db, "hourly-lifecycle-schema", "Shared");
+            await HourlyProcessLifecycle.LockAsync(Db, "hourly-config:" + definition.Code);
+            var old = await Db.Queryable<HourlyProductionBoardEntity>().InSingleAsync(definition.Code);
+            if (old != null)
+            {
+                if (old.AppCode != access.AppCode || !CanRead(access, Definition(old)))
+                    throw new UnauthorizedAccessException("不可修改其他系统或未授权的看板");
+                if (old.Version != definition.Version) throw new InvalidOperationException("配置已被修改，请刷新后重试");
+                await ProtectHistoryAsync(Definition(old), definition);
+            }
+            else if (definition.Version != 0) throw new InvalidOperationException("看板不存在，请重新创建");
+            definition.RemovedLines = old == null ? [] : Definition(old).RemovedLines;
+            if (definition.Lines.Any(line => definition.RemovedLines.Any(removed => string.Equals(removed.Definition.Code, line.Code, StringComparison.OrdinalIgnoreCase))))
+                throw new ArgumentException("该线体编码已移除并保留历史，请使用新的线体编码");
+            if (old != null)
+                foreach (var removed in Definition(old).Lines.Where(line => !definition.Lines.Any(next => string.Equals(next.Code, line.Code, StringComparison.OrdinalIgnoreCase))))
+                    definition.RemovedLines.Add(new HourlyRemovedLine { Definition=removed, RemovedAt=HourlyProductionRules.Now, RemovedBy=access.UserId });
+            definition.ShiftHistory = old == null ? [] : Definition(old).ShiftHistory;
+            definition.CancelledShifts = old == null ? [] : Definition(old).CancelledShifts;
+            if (definition.CancelShiftEffectiveAt is { } cancelAt)
+            {
+                if (definition.ShiftChange != null) throw new ArgumentException("请先完成版本撤销，再新增班次版本");
+                var cancelledAt = HourlyProductionRules.Now;
+                var cancelled = HourlyProductionRules.CancelPendingShift(definition, cancelAt, cancelledAt);
+                definition.CancelledShifts.Add(new HourlyShiftCancellation { Plan=cancelled, CancelledAt=cancelledAt, CancelledBy=access.UserId });
+                definition.CancelShiftEffectiveAt = null;
+            }
+            definition.LegacyTargets = old == null ? null : Definition(old).LegacyTargets;
+            if(definition.ShiftChange!=null && definition.LegacyTargets==null)
+            {
+                var baseline=old==null?definition:Definition(old);
+                definition.LegacyTargets=new();
+                foreach(var l in baseline.Lines) {definition.LegacyTargets[l.Code]=l.Targets.ToList();foreach(var p in l.Processes)definition.LegacyTargets[l.Code+"/"+p.Code]=p.Targets.ToList();}
+            }
+            if (definition.ShiftChange is { } change)
+            {
+                HourlyShiftRules.Validate(change.DayStart,change.NightStart);
+                if(change.EffectiveAt < HourlyProductionRules.Now) throw new ArgumentException("新班次必须从未来时间生效");
+                if(definition.ShiftHistory.Any(x=>x.EffectiveAt>=change.EffectiveAt)) throw new ArgumentException("生效时间必须晚于已保存的班次版本");
+                var nextWindow=HourlyShiftRules.At(change.DayStart,change.NightStart,change.EffectiveAt);
+                if(nextWindow.Start!=change.EffectiveAt) throw new ArgumentException("生效时间必须是新白班或夜班的开始时间");
+                var priorWindow=HourlyProductionRules.Window(definition,change.EffectiveAt.AddTicks(-1));
+                if(old!=null && priorWindow.End!=change.EffectiveAt) throw new ArgumentException("生效时间必须与原班次结束时间衔接，避免截断正在生产的班次");
+                foreach(var values in new[]{change.DayTargets,change.NightTargets})
+                foreach(var pair in values)
+                {
+                    var isDay=ReferenceEquals(values,change.DayTargets);
+                    var start=isDay?change.DayStart:change.NightStart; var end=isDay?change.NightStart:change.DayStart;
+                    var duration=(TimeSpan.Parse(end)-TimeSpan.Parse(start)).TotalHours; if(duration<=0)duration+=24;
+                    if(pair.Value==null || pair.Value.Count>Math.Ceiling(duration) || pair.Value.Any(x=>x is <0 or >1000000000)) throw new ArgumentException("班次目标数量或数值无效");
+                }
+                definition.ShiftHistory.Add(change); definition.ShiftChange=null;
+            }
+            await BindInstancesAsync(old == null ? null : Definition(old), definition, HourlyProductionRules.Now);
+            var expectedVersion = definition.Version;
+            definition.Version++;
+            var row = new HourlyProductionBoardEntity
+            {
+                Code = definition.Code, AppCode = access.AppCode, DefinitionJson = JsonSerializer.Serialize(definition),
+                Version = definition.Version, Published = definition.Published, UpdatedBy = access.UserId,
+                UpdateTime = HourlyProductionRules.Now
+            };
+            if (old == null) await Db.Insertable(row).ExecuteCommandAsync();
+            else if (await Db.Updateable(row).Where(x => x.Code == row.Code && x.Version == expectedVersion).ExecuteCommandAsync() == 0)
+                throw new InvalidOperationException("配置已被修改，请刷新后重试");
+        });
+        if (!saved.IsSuccess) throw saved.ErrorException!;
         catalog.Boards = (await Db.Queryable<HourlyProductionBoardEntity>().ToListAsync()).Select(Definition).ToArray();
         return definition;
     }
 
     private async Task ProtectHistoryAsync(HourlyBoardDefinition old, HourlyBoardDefinition next)
     {
-        var hasEvents = await Db.Queryable<HourlyProductionPassEntity>().AnyAsync(x => x.BoardCode == old.Code);
+        var hasEvents = await Db.Queryable<HourlyProductionPassEntity>().AnyAsync(x => x.BoardCode == old.Code) ||
+            await Db.Queryable<HourlyProductionBucketEntity>().AnyAsync(x => x.BoardCode == old.Code);
         if (!hasEvents) return;
         if (old.StartTime != next.StartTime || old.EndTime != next.EndTime)
             throw new InvalidOperationException("已有过站记录的看板不能改班次边界，请复制为新编码看板，避免改写历史归属");
@@ -91,16 +141,12 @@ public sealed partial class HourlyProductionService(
         foreach (var process in line.Processes)
         {
             var prior = old.Lines.FirstOrDefault(x => x.Code == line.Code)?.Processes.FirstOrDefault(x => x.Code == process.Code);
-            var key = ProcessKey(line, process);
-            if (prior == null)
-            {
-                if (await Db.Queryable<HourlyProductionPassEntity>().AnyAsync(x => x.BoardCode == old.Code && x.ProcessKey == key))
-                    throw new InvalidOperationException("已移除但有历史数据的工序编码不可复用，请使用新编码");
-                continue;
-            }
+            if (prior == null || process.CreationMode == "New" || process.CreationMode == "Restore") continue;
+            var key = ProcessKey(line, prior);
             if (StatisticalRule(prior) != StatisticalRule(process) &&
-                await Db.Queryable<HourlyProductionPassEntity>().AnyAsync(x => x.BoardCode == old.Code && x.ProcessKey == key))
-                throw new InvalidOperationException($"{line.Name}/{process.Name} 已有统计记录；修改统计口径请新增工序编码，原工序可停用或移除");
+                (await Db.Queryable<HourlyProductionPassEntity>().AnyAsync(x => x.BoardCode == old.Code && x.ProcessKey == key) ||
+                 await Db.Queryable<HourlyProductionBucketEntity>().AnyAsync(x => x.BoardCode == old.Code && x.ProcessKey == key)))
+                throw new InvalidOperationException($"{line.Name}/{process.Name} 已有统计记录；修改统计口径请移除后以新工序添加，可沿用原编码并单独统计");
         }
     }
 
@@ -134,8 +180,17 @@ public sealed partial class HourlyProductionService(
             throw new ArgumentException("刷新间隔需为5至300秒，AI间隔需为1至120分钟");
         // 复用已有生产看板模型配置，不允许配置任意 Agent 来绕过业务边界。
         board.AiAgentCode = "production-dashboard";
-        if (board.Lines.Count != 2 || board.Lines.Select(x => x.Code).Distinct(StringComparer.OrdinalIgnoreCase).Count() != 2)
-            throw new ArgumentException("一个看板需要配置两条不同编码的线体");
+        if (board.Lines.Count is < 1 or > 20 || board.Lines.Select(x => x.Code).Distinct(StringComparer.OrdinalIgnoreCase).Count() != board.Lines.Count)
+            throw new ArgumentException("一个看板支持1至20条不同编码的线体");
+        if (board.Layout is { } layout)
+        {
+            if (layout.Mode is not ("Single" or "Compare" or "Rotate") || layout.RotationSeconds is < 5 or > 300 || layout.Groups == null || layout.Groups.Count is < 1 or > 20)
+                throw new ArgumentException("布局模式、轮播间隔或对比组数量无效");
+            if (layout.Mode != "Rotate" && layout.Groups.Count != 1) throw new ArgumentException("单线与双线布局仅允许一组");
+            foreach (var group in layout.Groups)
+                if (group == null || group.Count != (layout.Mode == "Single" ? 1 : 2) || group.Distinct(StringComparer.OrdinalIgnoreCase).Count() != group.Count || group.Any(code => !board.Lines.Any(line => line.Code == code)))
+                    throw new ArgumentException("请选择存在且不重复的对比线体");
+        }
         var slots = HourlyProductionRules.Slots(board, HourlyProductionRules.Now).Count;
         foreach (var line in board.Lines)
         {
@@ -199,7 +254,7 @@ public sealed partial class HourlyProductionService(
     private static HourlyBoardDefinition Definition(HourlyProductionBoardEntity row) =>
         JsonSerializer.Deserialize<HourlyBoardDefinition>(row.DefinitionJson) ?? throw new InvalidOperationException("看板配置损坏");
 
-    private static string ProcessKey(HourlyLineDefinition line, HourlyProcessDefinition process) => line.Code + "/" + process.Code;
+    private static string ProcessKey(HourlyLineDefinition line, HourlyProcessDefinition process) => HourlyProcessLifecycle.Key(line, process);
 
     private async Task<(HourlyProductionBoardEntity Row, HourlyBoardDefinition Definition)> GetAsync(
         ApplicationAccessContext? access, string code, bool publicRead)
@@ -222,25 +277,32 @@ public sealed partial class HourlyProductionService(
         return (row, definition);
     }
 
-    public async Task<HourlyBoardRuntime> RuntimeAsync(ApplicationAccessContext? access, string code, bool publicRead = false)
+    public async Task<HourlyBoardRuntime> RuntimeAsync(ApplicationAccessContext? access, string code, bool publicRead = false, bool previous = false)
     {
         using var operation = DatabaseOperationScope.Begin(scope);
         var (_, definition) = await GetAsync(access, code, publicRead);
-        return await BuildRuntimeAsync(definition, HourlyProductionRules.Now);
+        var now=HourlyProductionRules.Now;
+        var time=previous ? HourlyProductionRules.Window(definition,now).Start.AddTicks(-1) : now;
+        return await BuildRuntimeAsync(definition, now,time);
     }
 
     private async Task<HourlyBoardRuntime> BuildRuntimeAsync(HourlyBoardDefinition board, DateTime now, DateTime? windowTime = null)
     {
         var slots = HourlyProductionRules.Slots(board, windowTime ?? now);
+        var selectedTime=windowTime ?? now;
+        var plan=HourlyProductionRules.Plan(board,selectedTime);
         var start = slots[0].Start;
         var end = slots[^1].End;
         var buckets = await Db.Queryable<HourlyProductionBucketEntity>()
             .Where(x => x.BoardCode == board.Code && x.SlotStart >= start && x.SlotStart < end).ToListAsync();
+        var activeKeys = board.Lines.SelectMany(line => line.Processes.Where(process => process.Enabled).Select(process => ProcessKey(line, process))).ToHashSet(StringComparer.Ordinal);
+        buckets = buckets.Where(x => activeKeys.Contains(x.ProcessKey)).ToList();
         var advice = await Db.Queryable<HourlyProductionAdviceEntity>().InSingleAsync(board.Code);
         var runtime = new HourlyBoardRuntime
         {
-            Code = board.Code, Name = board.Name, Version = board.Version, RefreshSeconds = board.RefreshSeconds,
-            ProductionDate = start.Date, ServerTime = now,
+            Code = board.Code, Name = board.Name, Version = board.Version, RefreshSeconds = board.RefreshSeconds, Layout=board.Layout,
+            ProductionDate = start.Date, ServerTime = now, ShiftStart=start, ShiftEnd=end,
+            ShiftName=plan==null?"原班次":HourlyShiftRules.At(plan.DayStart,plan.NightStart,selectedTime).Code=="Day"?"白班":"夜班",
             DataUpdatedAt = buckets.Count > 0 ? buckets.Max(x => x.UpdatedAt) : null,
             Advice = board.AiEnabled && advice?.ExpiresAt > now ? advice.Content : null
         };
@@ -258,7 +320,7 @@ public sealed partial class HourlyProductionService(
                 {
                     var slot = slots[i];
                     var bucket = buckets.FirstOrDefault(x => x.ProcessKey == key && x.SlotStart == slot.Start);
-                    var target = process.Targets.ElementAtOrDefault(i);
+                    var target = HourlyProductionRules.Targets(board,selectedTime,line.Code+"/"+process.Code,process.Targets).ElementAtOrDefault(i);
                     if (target is <= 0) target = null;
                     var output = item.Configured && now >= slot.Start ? bucket?.Output ?? 0 : (decimal?)null;
                     item.Points.Add(new HourlyPoint
@@ -276,7 +338,8 @@ public sealed partial class HourlyProductionService(
             result.SummaryProcessName = summary?.Name;
             result.SummaryPoints = summary?.Points.Select((point, index) =>
             {
-                var target = line.Targets.Count > 0 ? line.Targets.ElementAtOrDefault(index) : point.Target;
+                var lineTargets=HourlyProductionRules.Targets(board,selectedTime,line.Code,line.Targets);
+                var target = lineTargets.Count > 0 ? lineTargets.ElementAtOrDefault(index) : point.Target;
                 if (target is <= 0) target = null;
                 return new HourlyPoint
                 {

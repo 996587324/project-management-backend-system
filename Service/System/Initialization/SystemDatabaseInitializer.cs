@@ -43,6 +43,7 @@ public sealed class SystemDatabaseInitializer
             await ProcessBoardMenus.SeedAsync(db);
             await PushCenterMenus.SeedAsync(db);
             await HourlyProductionMenus.SeedAsync(db);
+            await WorkTaskMenus.SeedAsync(db);
             _initialized = true;
             _logger.LogInformation("System accounts and menus initialized in {ElapsedMilliseconds} ms.", stopwatch.ElapsedMilliseconds);
         }

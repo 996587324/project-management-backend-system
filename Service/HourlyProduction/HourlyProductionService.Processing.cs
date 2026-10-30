@@ -154,6 +154,7 @@ public sealed partial class HourlyProductionService
                         ParseTime(Token(values, binding.TimePath));
                     if (occurred.Year < 2000 || occurred.Year > 2100)
                         throw new ArgumentException("过站时间必须在2000至2100年范围内");
+                    if (process.ActiveSince.HasValue && (inbox.ReceivedAt < process.ActiveSince.Value || occurred < process.ActiveSince.Value)) continue;
                     var window = HourlyProductionRules.Window(board, occurred);
                     if (occurred < window.Start || occurred >= window.End) continue;
                     var slot = HourlyProductionRules.Slots(board, occurred).Single(x => occurred >= x.Start && occurred < x.End);
@@ -169,7 +170,7 @@ public sealed partial class HourlyProductionService
                         EventKey = HourlyProductionRules.Hash(inbox.EventKey + "\u001f" + board.Code + "\u001f" +
                             ProcessKey(line, process) + "\u001f" + binding.Code),
                         BoardCode = board.Code, ProcessKey = ProcessKey(line, process), Sn = sn,
-                        ProductionDate = window.Start.Date, SlotStart = slot.Start, OccurredAt = occurred,
+                        ProductionDate = HourlyProductionRules.Plan(board,occurred)==null ? window.Start.Date : window.Start, SlotStart = slot.Start, OccurredAt = occurred,
                         Quantity = quantity, ExplicitRework = binding.ReworkPath.Length > 0 &&
                             Text(Token(values, binding.ReworkPath)) == binding.ReworkValue, RuleVersion = board.Version
                     };
@@ -190,6 +191,11 @@ public sealed partial class HourlyProductionService
     {
         var transaction = await Db.Ado.UseTranAsync(async () =>
         {
+            await HourlyProcessLifecycle.LockAsync(Db, "hourly-lifecycle-schema", "Shared");
+            await HourlyProcessLifecycle.LockAsync(Db, "hourly-config:" + pass.BoardCode, "Shared");
+            var current = await Db.Queryable<HourlyProductionBoardEntity>().InSingleAsync(pass.BoardCode);
+            if (current == null || current.Version != pass.RuleVersion)
+                throw new InvalidOperationException("小时看板配置已更新，保留待处理报文，下轮按新配置处理");
             // 数据库事务级锁覆盖重算与桶差量，支持多个实例、重启补偿和乱序报文。
             var resource = "hourly:" + HourlyProductionRules.Hash(pass.BoardCode + pass.ProcessKey + pass.ProductionDate.ToString("yyyyMMdd"));
             await Db.Ado.ExecuteCommandAsync("DECLARE @r int; EXEC @r=sys.sp_getapplock @Resource=@key, @LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=10000; IF @r < 0 THROW 51000, 'hourly statistic lock timeout', 1;",

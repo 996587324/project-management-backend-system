@@ -34,6 +34,7 @@ public sealed class SystemApplicationMenuService(SqlSugarScope scope, IMapper ma
             ancestors.Remove(row.Id);
             if (menu.Status != true && !includeDisabled) continue;
             var allowed = access.HasPermission(row.PermissionKey);
+            if (row.PermissionKey.StartsWith("WorkTasks", StringComparison.Ordinal)) allowed = access.Permissions.Contains(row.PermissionKey);
             if (row.PermissionKey == "ApplicationAdministration") allowed = access.PlatformAdministrator;
             if (menu.Component == "/shared-data/model-dictionary")
                 allowed = access.PlatformAdministrator || access.HasPermission("shared-dictionary.read");

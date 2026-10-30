@@ -26,18 +26,24 @@ public sealed class HourlyProductionInitializer(SqlSugarScope scope, HourlyProdu
         {
             if (IsReady) return;
             using var db = scope.GetConnection("calmadmin").CopyNew();
-            db.CodeFirst.InitTables(typeof(HourlyProductionBoardEntity), typeof(HourlyProductionInboxEntity),
-                typeof(HourlyProductionPassEntity), typeof(HourlyProductionBucketEntity),
-                typeof(HourlyProductionReportEntity), typeof(HourlyProductionDispatchEntity),
-                typeof(HourlyProductionWorkerStateEntity), typeof(HourlyProductionAdviceEntity));
-            // 首次部署从当前中心队列水位开始，不擅自重放此前全部报文。
-            if (!await db.Queryable<HourlyProductionWorkerStateEntity>().AnyAsync())
+            var migration = await db.Ado.UseTranAsync(async () =>
             {
-                var cursor = db.DbMaintenance.IsAnyTable("EdgeGatewayMessageQueue", false)
-                    ? await db.Queryable<Model.EdgeGateway.EdgeMessageQueueEntity>().MaxAsync(x => x.Id) : 0;
-                await db.Insertable(new HourlyProductionWorkerStateEntity { EdgeCursor = cursor }).ExecuteCommandAsync();
-            }
-            await HourlyProductionMenus.SeedAsync(db);
+                await HourlyProcessLifecycle.LockAsync(db, "hourly-lifecycle-schema");
+                db.CodeFirst.InitTables(typeof(HourlyProductionBoardEntity), typeof(HourlyProductionInboxEntity),
+                    typeof(HourlyProductionPassEntity), typeof(HourlyProductionBucketEntity),
+                    typeof(HourlyProductionReportEntity), typeof(HourlyProductionDispatchEntity),
+                    typeof(HourlyProductionWorkerStateEntity), typeof(HourlyProductionAdviceEntity), typeof(HourlyProductionProcessEntity));
+                await HourlyProcessLifecycle.MigrateAsync(db);
+                // 首次部署从当前中心队列水位开始，不擅自重放此前全部报文。
+                if (!await db.Queryable<HourlyProductionWorkerStateEntity>().AnyAsync())
+                {
+                    var cursor = db.DbMaintenance.IsAnyTable("EdgeGatewayMessageQueue", false)
+                        ? await db.Queryable<Model.EdgeGateway.EdgeMessageQueueEntity>().MaxAsync(x => x.Id) : 0;
+                    await db.Insertable(new HourlyProductionWorkerStateEntity { EdgeCursor = cursor }).ExecuteCommandAsync();
+                }
+                await HourlyProductionMenus.SeedAsync(db);
+            });
+            if (!migration.IsSuccess) throw migration.ErrorException!;
             catalog.Boards = (await db.Queryable<HourlyProductionBoardEntity>().ToListAsync())
                 .Select(x => JsonSerializer.Deserialize<HourlyBoardDefinition>(x.DefinitionJson)!)
                 .Where(x => x != null).ToArray();

@@ -4,6 +4,7 @@ using Kdbndp.TypeMapping;
 using Model.Common;
 using Model.Dto;
 using Model.Menu;
+using Model.SystemApplications;
 using Model.User;
 using SqlSugar;
 using System;
@@ -73,6 +74,8 @@ namespace Service
         /// </summary>
         public async Task<bool> AddMenuAsync(BackMenuDto menu)
         {
+            if (menu.MenuType == "menu")
+                return await AddRouteMenuAsync(menu);
             try
             {
                 var entity = new sys_menu();
@@ -129,6 +132,89 @@ namespace Service
                 throw;
             }
            
+        }
+
+        private async Task<bool> AddRouteMenuAsync(BackMenuDto menu)
+        {
+            static string Required(string? value, int max, string label)
+            {
+                var text = value?.Trim() ?? string.Empty;
+                if (text.Length == 0 || text.Length > max) throw new ArgumentException($"{label}不能为空且不能超过{max}个字符");
+                return text;
+            }
+            var name = Required(menu.Name, 128, "菜单标识");
+            var title = Required(menu.Label, 128, "菜单名称");
+            var path = Required(menu.Path, 255, "路由地址");
+            var component = menu.Component?.Trim() ?? string.Empty;
+            var icon = menu.Icon?.Trim() ?? string.Empty;
+            var roles = string.Join(",", menu.Roles ?? []);
+            if (component.Length > 255 || icon.Length > 64 || roles.Length > 512)
+                throw new ArgumentException("组件路径、图标或角色权限超过允许长度");
+            if (path.Contains('?') || path.Contains('#') || path.Contains("..") || path.Contains("://") || path.StartsWith("//"))
+                throw new ArgumentException("只允许站内路由地址");
+
+            using var db = _db.GetConnection("calmadmin").CopyNew();
+            var transaction = await db.Ado.UseTranAsync(async () =>
+            {
+                // 菜单编号和 A 系统关联一起提交；跨实例串行分配，避免与已有根菜单或子菜单冲突。
+                await db.Ado.ExecuteCommandAsync("DECLARE @r int; EXEC @r=sys.sp_getapplock @Resource='calmadmin:menu:create', @LockMode='Exclusive', @LockOwner='Transaction', @LockTimeout=10000; IF @r < 0 THROW 51000, 'menu create lock timeout', 1;");
+                var rows = await db.Queryable<sys_menu>().ToListAsync();
+                var byId = rows.ToDictionary(x => x.MenuId, StringComparer.OrdinalIgnoreCase);
+                string FullPath(sys_menu item)
+                {
+                    var segments = new Stack<string>();
+                    var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    for (var current = item; current != null && visited.Add(current.MenuId);)
+                    {
+                        segments.Push(current.Path.Trim('/'));
+                        if (current.ParentId == "0" || !byId.TryGetValue(current.ParentId, out var parent)) break;
+                        current = parent;
+                    }
+                    return "/" + string.Join('/', segments.Where(x => x.Length > 0));
+                }
+                sys_menu? parentMenu = null;
+                if (menu.ParentId.GetValueOrDefault() > 0)
+                    byId.TryGetValue(menu.ParentId!.Value.ToString(), out parentMenu);
+                else if (!string.IsNullOrWhiteSpace(menu.ActivePath))
+                    parentMenu = rows.FirstOrDefault(x => string.Equals(FullPath(x), menu.ActivePath.Trim().TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
+                if ((menu.ParentId.GetValueOrDefault() > 0 || !string.IsNullOrWhiteSpace(menu.ActivePath)) && parentMenu == null)
+                    throw new ArgumentException("父菜单不存在，请选择或填写有效的父路径");
+                if (parentMenu != null && !await db.Queryable<SysApplicationMenuEntity>().AnyAsync(x => x.AppCode == "A" && x.MenuId == parentMenu.MenuId))
+                    throw new ArgumentException("父菜单尚未加入当前系统，不能在其下新增菜单");
+                if (parentMenu == null && !path.StartsWith('/')) throw new ArgumentException("一级路由地址必须以 / 开头");
+                if (parentMenu != null && path.StartsWith('/'))
+                {
+                    var prefix = FullPath(parentMenu) + "/";
+                    if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("子菜单路由请填写相对路径或父路径下的完整地址");
+                    path = path[prefix.Length..];
+                }
+                if (string.IsNullOrWhiteSpace(path.Trim('/'))) throw new ArgumentException("路由地址不能为空");
+                var fullPath = parentMenu == null ? path.TrimEnd('/') : FullPath(parentMenu).TrimEnd('/') + "/" + path.Trim('/');
+                if (rows.Any(x => string.Equals(x.MenuName, name, StringComparison.OrdinalIgnoreCase)))
+                    throw new ArgumentException("菜单标识已存在，请使用其他标识");
+                if (rows.Any(x => string.Equals(FullPath(x), fullPath, StringComparison.OrdinalIgnoreCase)))
+                    throw new ArgumentException("路由地址已存在，请使用其他地址");
+
+                var usedIds = rows.Select(x => x.MenuId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var candidate = 1_000_000_000;
+                while (usedIds.Contains(candidate.ToString()))
+                {
+                    if (candidate == int.MaxValue) throw new InvalidOperationException("可用菜单编号不足");
+                    candidate++;
+                }
+                var entity = new sys_menu
+                {
+                    MenuId = candidate.ToString(), ParentId = parentMenu?.MenuId ?? "0", MenuName = name,
+                    Path = path, Component = component, MetaTitle = title, MetaIcon = icon, Sort = menu.Sort,
+                    Status = menu.IsEnable, MetaKeepAlive = menu.KeepAlive, MetaIsHide = menu.IsHide,
+                    MetaIsHideTab = menu.IsHideTab, MetaFixedTab = menu.FixedTab, MetaIsFullPage = menu.IsFullPage,
+                    MetaRoles = roles, MetaAuthList = "[]", CreateTime = DateTime.Now
+                };
+                await db.Insertable(entity).ExecuteCommandAsync();
+                await db.Insertable(new SysApplicationMenuEntity { AppCode = "A", MenuId = entity.MenuId }).ExecuteCommandAsync();
+            });
+            if (!transaction.IsSuccess) throw transaction.ErrorException ?? new InvalidOperationException("新增菜单失败");
+            return true;
         }
         /// <summary>
         /// 修改菜单

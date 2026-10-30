@@ -13,6 +13,7 @@ public interface IWeChatPushQueueService
     Task<EmailPage<WeChatPushQueueRecordDto>> GetRecordsAsync(ApplicationAccessContext access, long? taskId, int current, int size);
     Task RetryAsync(ApplicationAccessContext access, long id);
     Task DispatchAsync(CancellationToken cancellationToken);
+    Task<object> EnqueueWorkTaskAsync(string deliveryId);
     Task<int> GetIntervalAsync(ApplicationAccessContext access);
     Task<bool> CanConfigureAsync(ApplicationAccessContext access);
     Task SetIntervalAsync(ApplicationAccessContext access, int seconds);

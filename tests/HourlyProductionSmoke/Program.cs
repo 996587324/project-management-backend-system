@@ -35,6 +35,7 @@ var mailCount = 0;
 var wxCount = 0;
 var modelFails = false;
 var ownerRevoked = false;
+var stopUi = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 try
 {
     scope = new SqlSugarScope(new ConnectionConfig
@@ -360,6 +361,7 @@ try
     app.UseAuthentication();
     app.UseAuthorization();
     app.MapControllers();
+    if (Environment.GetEnvironmentVariable("HOURLY_UI_HOLD") == "1") app.MapPost("/__test/stop", () => { stopUi.TrySetResult(); return Results.Ok(); });
     app.MapMcp("/mcp/v2").AllowAnonymous();
     await app.StartAsync();
     var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
@@ -381,7 +383,22 @@ try
     Check((await client.PostAsJsonAsync("/api/hourly-production/definitions", NewBoard("blocked"))).StatusCode == HttpStatusCode.Forbidden,
         "read-only JWT cannot write through actual controller/filter");
     await HourlyDeletionSmoke.RunAsync(service, db, Access("owner"));
+    await HourlyReaddSmoke.RunAsync(service, ingress, scope, Access("owner"));
+    client.DefaultRequestHeaders.Remove("X-Test-User");
+    Check((await client.GetAsync("/api/hourly-production/definitions/readd-regression/removed-processes?lineCode=L1")).StatusCode == HttpStatusCode.Unauthorized, "anonymous archive access denied");
+    client.DefaultRequestHeaders.Add("X-Test-User", "reader");
+    Check((await client.GetAsync("/api/hourly-production/definitions/readd-regression/removed-processes?lineCode=L1")).StatusCode == HttpStatusCode.Forbidden, "read-only account cannot browse configuration archive");
+    client.DefaultRequestHeaders.Remove("X-Test-User"); client.DefaultRequestHeaders.Add("X-Test-User", "owner");
+    Check((await client.GetStringAsync("/api/hourly-production/definitions/readd-regression/removed-processes?lineCode=L1")).Contains("\"canRestore\":true"), "archive HTTP response exposes authorized restore metadata with camelCase contract");
     Console.WriteLine("PASS: isolated SQL initialization, legacy nullable migration, real inserts, 30m rework, late events, idempotency, overnight, edge projection, A/B/resource/public permissions, AI failure, report queue, MCP and HTTP.");
+    if (Environment.GetEnvironmentVariable("HOURLY_UI_HOLD") == "1")
+    {
+        var preview = (await service.ListAsync(Access("owner"))).Single(x => x.Code == "readd-regression");
+        preview.Name = "工序恢复隔离验证"; preview.Lines[0].Processes.RemoveAll(x => x.Code == "P1");
+        await service.SaveAsync(Access("owner"), preview);
+        Console.WriteLine("HOURLY_UI_API=" + address);
+        await Task.WhenAny(stopUi.Task, Task.Delay(TimeSpan.FromMinutes(60)));
+    }
 }
 finally
 {

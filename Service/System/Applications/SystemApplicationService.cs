@@ -99,6 +99,7 @@ public sealed class SystemApplicationService : ISystemApplicationService
             throw new UnauthorizedAccessException("请先在控制台选择系统");
         }
 
+        await WorkTaskAccessProjection.ApplyAsync(Db, permissions, user.UserId, appCode, platformAdministrator);
         return new ApplicationAccessContext
         {
             UserId = user.UserId, UserName = user.UserName, SessionId = sessionId, AppCode = appCode,
@@ -129,6 +130,8 @@ public sealed class SystemApplicationService : ISystemApplicationService
             foreach (var role in roles.Where(x => user.RoleList.Contains(x.roleCode)))
                 permissions.UnionWith(role.permissionKeyList);
         }
+        await WorkTaskAccessProjection.ApplyAsync(Db, permissions, user.UserId, appCode,
+            await Db.Queryable<SysPlatformAdministratorEntity>().AnyAsync(x => x.UserId == user.UserId));
         return new ApplicationAccessContext
         {
             UserId = user.UserId, UserName = user.UserName, AppCode = appCode,

@@ -16,6 +16,7 @@ public interface IEmailPushService
     Task<EmailPage<EmailRecordDto>> GetRecordsAsync(ApplicationAccessContext access, EmailRecordQuery query);
     Task RetryAsync(ApplicationAccessContext access, long deliveryId, EmailRetryDto dto);
     Task DispatchAsync(CancellationToken cancellationToken);
+    Task<EmailEnqueueResult> EnqueueWorkTaskAsync(string deliveryId);
     Task<EmailPage<EmailRecipientDto>> GetMcpRecipientsAsync(ExternalToolCallerContext caller, string? keyword, int current, int size);
     Task<object> GetMcpAvailabilityAsync(ExternalToolCallerContext caller);
     Task<EmailEnqueueResult> EnqueueByMcpAsync(ExternalToolCallerContext caller, EmailEnqueueDto dto);

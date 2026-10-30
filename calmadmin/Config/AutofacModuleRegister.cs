@@ -18,6 +18,7 @@ namespace 上传MES.Config
                 .Except<Service.EmailSecretProtector>()
                 .Except<Service.WeChatPushQueueInitializer>()
                 .Except<Service.HourlyProductionInitializer>()
+                .Except<Service.WorkTaskInitializer>()
                 .AsImplementedInterfaces();
 
             // SQLite 必须由唯一服务实例持有连接和访问锁，禁止采集、上传、心跳各建连接。

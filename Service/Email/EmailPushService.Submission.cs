@@ -171,6 +171,8 @@ public sealed partial class EmailPushService
         if (!dto.Confirm) throw new ArgumentException("请确认重试发送");
         var row = await Db.Queryable<EmailPushDeliveryEntity>().InSingleAsync(deliveryId)
             ?? throw new ArgumentException("投递记录不存在");
+        if (await Db.Queryable<EmailPushTaskEntity>().AnyAsync(x => x.Id == row.TaskId && x.Source == "WorkTask"))
+            throw new UnauthorizedAccessException("工作任务消息由业务来源管理，不能通过通用发送记录重试");
         if (row.Status is not ("Failed" or "Unknown")) throw new ArgumentException("只能重试失败或结果待核实的投递");
         if (row.Status == "Unknown" && !dto.AcknowledgeDuplicateRisk)
             throw new ArgumentException("结果待核实的邮件可能已经发出，须明确接受重复投递风险");

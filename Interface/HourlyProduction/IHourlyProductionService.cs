@@ -7,7 +7,8 @@ public interface IHourlyProductionService
 {
     Task<List<HourlyBoardDefinition>> ListAsync(ApplicationAccessContext access);
     Task<HourlyBoardDefinition> SaveAsync(ApplicationAccessContext access, HourlyBoardDefinition definition);
-    Task<HourlyBoardRuntime> RuntimeAsync(ApplicationAccessContext? access, string code, bool publicRead = false);
+    Task<List<HourlyRemovedProcess>> RemovedProcessesAsync(ApplicationAccessContext access, string code, string lineCode);
+    Task<HourlyBoardRuntime> RuntimeAsync(ApplicationAccessContext? access, string code, bool publicRead = false, bool previous = false);
     Task<object> ReportsAsync(ApplicationAccessContext access, string code, int page);
     Task<object> DispatchesAsync(ApplicationAccessContext access, string code, int page);
     Task RetryDispatchAsync(ApplicationAccessContext access, long id, bool confirm);

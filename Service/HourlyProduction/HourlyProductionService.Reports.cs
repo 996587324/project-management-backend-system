@@ -15,8 +15,7 @@ public sealed partial class HourlyProductionService
         {
             cancellationToken.ThrowIfCancellationRequested();
             var board = Definition(row);
-            var slots = HourlyProductionRules.Slots(board, now)
-                .Concat(HourlyProductionRules.Slots(board, now.AddDays(-1))).Distinct()
+            var slots = Enumerable.Range(0, 49).SelectMany(h=>HourlyProductionRules.Slots(board,now.AddHours(-h))).Distinct()
                 .Where(slot => slot.End.AddMinutes(board.Push.DelayMinutes) <= now &&
                     slot.End > now.AddHours(-board.Push.CatchUpHours) && slot.End >= row.UpdateTime)
                 .OrderBy(slot => slot.Start);
@@ -158,7 +157,7 @@ public sealed partial class HourlyProductionService
                 var reply = await model.GenerateReplyAsync(new AgentModelRequest
                 {
                     AgentCode = board.AiAgentCode, UserId = AgentModelConfigurationScope.SystemOwnerUserId,
-                    SystemPrompt = "你是产线小时统计分析助手。只根据提供的真实统计，比较两条线同工序的产出、返工、目标达成及衔接。未来时段、未设置目标、未绑定不可当成异常；统计中不能认定最终未达标。不执行控制。直接返回120字内中文结果建议，不要依据段落、不要Markdown、不要编造原因。无可用数据返回空字符串。",
+                    SystemPrompt = "你是产线小时统计分析助手。只根据提供的真实统计，比较所提供线体同工序的产出、返工、目标达成及衔接。未来时段、未设置目标、未绑定不可当成异常；统计中不能认定最终未达标。不执行控制。直接返回120字内中文结果建议，不要依据段落、不要Markdown、不要编造原因。无可用数据返回空字符串。",
                     UserMessage = JsonSerializer.Serialize(runtime)
                 }, timeout.Token);
                 advice.Content = reply.Success && !string.IsNullOrWhiteSpace(reply.Content) && reply.Content.Length <= 500
